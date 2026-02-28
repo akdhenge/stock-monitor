@@ -3,8 +3,9 @@ from typing import Any, Dict
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QSpinBox, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
+from PyQt5.QtCore import QTime
 
 from core.settings_store import load_settings, save_settings
 from notifiers.email_notifier import EmailNotifier
@@ -25,6 +26,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_general_tab(), "General")
         tabs.addTab(self._build_telegram_tab(), "Telegram")
         tabs.addTab(self._build_email_tab(), "Email")
+        tabs.addTab(self._build_scanner_tab(), "Scanner")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save_and_accept)
@@ -151,6 +153,87 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return w
 
+    # ── Scanner Tab ───────────────────────────────────────────────────────────
+
+    def _build_scanner_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # Telegram command polling
+        self._cmd_polling_enabled = QCheckBox("Enable Telegram command polling")
+        self._cmd_polling_enabled.setChecked(
+            self._settings.get("telegram_command_polling_enabled", False)
+        )
+        layout.addWidget(self._cmd_polling_enabled)
+
+        layout.addSpacing(8)
+
+        # Daily quick scan
+        self._daily_scan_enabled = QCheckBox("Enable daily quick scan (after market close)")
+        self._daily_scan_enabled.setChecked(
+            self._settings.get("scanner_daily_scan_enabled", False)
+        )
+        layout.addWidget(self._daily_scan_enabled)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self._daily_scan_time = QTimeEdit()
+        self._daily_scan_time.setDisplayFormat("HH:mm")
+        time_str = self._settings.get("scanner_daily_scan_time_et", "16:15")
+        try:
+            h, m = [int(x) for x in time_str.split(":")]
+        except (ValueError, AttributeError):
+            h, m = 16, 15
+        self._daily_scan_time.setTime(QTime(h, m))
+        form.addRow("Daily scan time (ET):", self._daily_scan_time)
+
+        layout.addSpacing(8)
+
+        # Weekly deep scan
+        self._weekly_scan_enabled = QCheckBox("Enable weekly deep scan")
+        self._weekly_scan_enabled.setChecked(
+            self._settings.get("scanner_weekly_scan_enabled", False)
+        )
+        layout.addWidget(self._weekly_scan_enabled)
+
+        form2 = QFormLayout()
+        layout.addLayout(form2)
+
+        self._weekly_scan_time = QTimeEdit()
+        self._weekly_scan_time.setDisplayFormat("HH:mm")
+        wtime_str = self._settings.get("scanner_weekly_scan_time_et", "20:00")
+        try:
+            wh, wm = [int(x) for x in wtime_str.split(":")]
+        except (ValueError, AttributeError):
+            wh, wm = 20, 0
+        self._weekly_scan_time.setTime(QTime(wh, wm))
+        form2.addRow("Weekly scan time (ET):", self._weekly_scan_time)
+
+        layout.addSpacing(8)
+
+        # Universe size
+        form3 = QFormLayout()
+        layout.addLayout(form3)
+
+        self._universe_spin = QSpinBox()
+        self._universe_spin.setRange(50, 500)
+        self._universe_spin.setSingleStep(50)
+        self._universe_spin.setValue(self._settings.get("scanner_universe_size", 200))
+        form3.addRow("Universe size (top N S&P 500):", self._universe_spin)
+
+        layout.addStretch()
+
+        note = QLabel(
+            "Daily scan runs at the configured ET time Mon–Fri.\n"
+            "Weekly scan runs every Sunday at the configured ET time.\n"
+            "Universe size controls how many S&P 500 stocks are screened."
+        )
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        return w
+
     def _test_email(self) -> None:
         notifier = EmailNotifier(
             smtp_host=self._smtp_host.text().strip(),
@@ -168,6 +251,8 @@ class SettingsDialog(QDialog):
     # ── Save ──────────────────────────────────────────────────────────────────
 
     def _save_and_accept(self) -> None:
+        daily_t = self._daily_scan_time.time()
+        weekly_t = self._weekly_scan_time.time()
         self._settings.update({
             "poll_interval_seconds": self._poll_spin.value(),
             "cooldown_minutes": self._cooldown_spin.value(),
@@ -180,6 +265,13 @@ class SettingsDialog(QDialog):
             "email_username": self._email_user.text().strip(),
             "email_password": self._email_pass.text(),
             "email_to": self._email_to.text().strip(),
+            "telegram_command_polling_enabled": self._cmd_polling_enabled.isChecked(),
+            "scanner_daily_scan_enabled": self._daily_scan_enabled.isChecked(),
+            "scanner_daily_scan_time_et": f"{daily_t.hour():02d}:{daily_t.minute():02d}",
+            "scanner_weekly_scan_enabled": self._weekly_scan_enabled.isChecked(),
+            "scanner_weekly_scan_day": 6,
+            "scanner_weekly_scan_time_et": f"{weekly_t.hour():02d}:{weekly_t.minute():02d}",
+            "scanner_universe_size": self._universe_spin.value(),
         })
         save_settings(self._settings)
         self.accept()

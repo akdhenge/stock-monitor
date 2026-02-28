@@ -60,6 +60,22 @@ class TelegramNotifier(BaseNotifier):
             return False, f"Connection error: {exc}"
 
     @staticmethod
+    def send_message(token: str, chat_id: str, text: str) -> bool:
+        """Send a plain-text message to a Telegram chat. Returns True on success."""
+        if not token or not chat_id:
+            return False
+        url = _API_BASE.format(token=token, method="sendMessage")
+        try:
+            resp = requests.post(
+                url,
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=_TIMEOUT,
+            )
+            return resp.ok
+        except requests.RequestException:
+            return False
+
+    @staticmethod
     def get_updates(token: str) -> Tuple[bool, Optional[str], str]:
         """
         Poll getUpdates to auto-detect a chat_id.

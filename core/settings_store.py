@@ -17,6 +17,13 @@ _DEFAULTS: Dict[str, Any] = {
     "email_username": "",
     "email_password": "",
     "email_to": "",
+    "telegram_command_polling_enabled": False,
+    "scanner_universe_size": 500,
+    "scanner_daily_scan_enabled": False,
+    "scanner_weekly_scan_enabled": False,
+    "scanner_daily_scan_time_et": "16:15",
+    "scanner_weekly_scan_day": 6,
+    "scanner_weekly_scan_time_et": "20:00",
 }
 
 

@@ -1,0 +1,165 @@
+================================================================================
+STOCK MONITOR — USER MANUAL
+================================================================================
+
+--------------------------------------------------------------------------------
+SMART SCANNER — COLUMNS EXPLAINED
+--------------------------------------------------------------------------------
+
+After running a Quick Scan or Deep Scan, the results table shows 12 columns:
+
+  #         Rank by total score (1 = best candidate)
+  Symbol    Stock ticker (e.g. AAPL, MSFT)
+  Total     Weighted composite score (0–100)
+  Value     Value sub-score — 40% of Total
+  Growth    Growth sub-score — 30% of Total
+  Tech      Technical sub-score — 30% of Total
+  P/E       Trailing Price-to-Earnings ratio (e.g. 18.2)
+  PEG       Price/Earnings-to-Growth ratio (e.g. 1.1)
+  D/E       Debt-to-Equity ratio (e.g. 0.3)
+  RevGrow%  Year-over-year revenue growth (e.g. 12.0%)
+  ROE%      Return on Equity (e.g. 28.0%)
+  RSI       Relative Strength Index, 14-day (0–100)
+
+
+TOTAL SCORE FORMULA
+-------------------
+  Total = (Value × 0.4) + (Growth × 0.3) + (Tech × 0.3)
+
+
+SCORE COLUMNS IN DETAIL
+------------------------
+
+  VALUE (0–100) — Is the stock cheap?
+    Scores four things, each worth up to 25 points:
+    - P/E vs sector median PE
+        < 50% of median  → 25 pts
+        < 75%            → 18 pts
+        < 100%           → 10 pts
+        < 125%           →  5 pts
+    - PEG ratio
+        < 0.75           → 25 pts
+        < 1.00           → 20 pts
+        < 1.50           → 10 pts
+    - Debt-to-Equity
+        < 0.3            → 25 pts
+        < 0.7            → 18 pts
+        < 1.0            → 10 pts
+        < 1.5            →  5 pts
+        None/unknown     → 12 pts (neutral)
+    - Price vs 52-week high
+        < 50% of high    → 25 pts
+        < 60%            → 22 pts
+        < 70%            → 18 pts
+        < 80%            → 10 pts
+        < 90%            →  5 pts
+
+  GROWTH (0–100) — Is the business growing?
+    - Revenue growth (max 40 pts)
+        > 30%            → 40 pts
+        > 20%            → 32 pts
+        > 10%            → 24 pts
+        >  5%            → 12 pts
+        >  0%            →  6 pts
+    - Free Cash Flow (max 30 pts)
+        > $1 billion     → 30 pts
+        > $100 million   → 22 pts
+        > $0             → 12 pts
+    - Return on Equity (max 30 pts)
+        > 30%            → 30 pts
+        > 20%            → 22 pts
+        > 12%            → 14 pts
+        >  5%            →  6 pts
+
+  TECH (0–100) — Is now a good time to buy?
+    - RSI / oversold signal (max 40 pts)
+        RSI < 20         → 40 pts  (extremely oversold)
+        RSI < 30         → 32 pts  (oversold)
+        RSI < 40         → 18 pts  (approaching oversold)
+        RSI < 50         →  8 pts
+    - MACD bullish crossover (max 20 pts)
+        Previous MACD < Signal AND current MACD > Signal → 20 pts
+    - Near 200-day moving average within 5% (max 20 pts)
+        True → 20 pts
+    - Volume spike > 1.5× 20-day average (max 20 pts)
+        True → 20 pts
+
+
+RAW METRIC COLUMNS
+------------------
+
+  P/E       Lower = cheaper relative to earnings.
+            Scored against the median P/E of stocks in the same sector.
+
+  PEG       Below 1.0 often indicates undervalued relative to growth rate.
+            Below 0.75 is considered very attractive.
+
+  D/E       Lower = less debt. Below 0.3 is considered conservative.
+            High D/E (>1.5) scores zero in the value component.
+
+  RevGrow%  Year-over-year revenue growth. Above 20% scores strongly.
+            Negative growth disqualifies a stock from quick scan.
+
+  ROE%      How efficiently the company uses shareholder capital.
+            Above 20% is considered strong.
+
+  RSI       14-day Relative Strength Index.
+            Below 30 = oversold (potential buy signal).
+            Above 70 = overbought (potential sell signal).
+
+
+ROW COLOR CODING
+----------------
+
+  Green       Total score >= 65   Strongest — cheap, growing, and oversold; act on it
+  Yellow      Total score 50–64   Stronger  — good case across most dimensions
+  Orange      Total score 35–49   Weak      — mixed signals, some positives and gaps
+  Dark Orange Total score 20–34   Weaker    — mostly expensive or poor fundamentals
+  Red         Total score <  20   Weakest   — avoid; poor across all dimensions
+
+
+--------------------------------------------------------------------------------
+BOT COMMANDS (Telegram)
+--------------------------------------------------------------------------------
+
+  /add SYMBOL LOW HIGH [notes]   Add a stock to the watchlist
+                                 e.g. /add AAPL 150 200 long-term hold
+
+  /remove SYMBOL                 Remove a stock from the watchlist
+                                 e.g. /remove AAPL
+
+  /list                          Show the full watchlist with current prices
+
+  /scan                          Trigger a quick scan immediately
+
+  /top                           Show the top 5 stocks from the last scan
+
+
+--------------------------------------------------------------------------------
+SCAN MODES
+--------------------------------------------------------------------------------
+
+  Quick Scan   Batch-fetches prices for up to 200 S&P 500 stocks.
+               Filters for: price < 70% of 52-week high, positive revenue
+               growth, and a valid P/E ratio. Fast (~1–2 min).
+               Runs automatically Mon–Fri at the configured ET time (default 16:15).
+
+  Deep Scan    Takes quick scan candidates and fetches full fundamentals +
+               1-year price history per stock. Computes all three sub-scores,
+               ranks results, and alerts on new top-5 entries via Telegram.
+               Slower (2s delay per stock). Runs weekly on Sunday at 20:00 ET.
+
+
+--------------------------------------------------------------------------------
+SETTINGS — SCANNER TAB
+--------------------------------------------------------------------------------
+
+  Enable Telegram command polling    Turns on /add /remove /list /scan /top bot
+  Enable daily quick scan            Runs quick scan Mon–Fri at configured ET time
+  Daily scan time (ET)               Time to run the daily quick scan
+  Enable weekly deep scan            Runs deep scan on Sunday at configured ET time
+  Weekly scan time (ET)              Time to run the weekly deep scan
+  Universe size                      How many S&P 500 stocks to screen (50–500)
+
+
+================================================================================
