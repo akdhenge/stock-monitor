@@ -158,77 +158,88 @@ class SettingsDialog(QDialog):
     def _build_scanner_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
+        layout.setSpacing(10)
 
-        # Telegram command polling
+        # ── Telegram command polling ──
         self._cmd_polling_enabled = QCheckBox("Enable Telegram command polling")
         self._cmd_polling_enabled.setChecked(
             self._settings.get("telegram_command_polling_enabled", False)
         )
         layout.addWidget(self._cmd_polling_enabled)
 
-        layout.addSpacing(8)
+        layout.addSpacing(4)
 
-        # Daily quick scan
-        self._daily_scan_enabled = QCheckBox("Enable daily quick scan (after market close)")
-        self._daily_scan_enabled.setChecked(
-            self._settings.get("scanner_daily_scan_enabled", False)
+        # ── Quick Scan (manual only) ──
+        quick_box = QGroupBox("Quick Scan  —  S&P 500, price filter only")
+        quick_layout = QVBoxLayout(quick_box)
+        quick_layout.addWidget(QLabel("Manual trigger only (toolbar button or /scan bot command)."))
+        layout.addWidget(quick_box)
+
+        # ── Deep Scan (hourly, S&P 500) ──
+        deep_box = QGroupBox("Deep Scan  —  S&P 500 (~500 stocks), full scoring")
+        deep_form = QFormLayout(deep_box)
+
+        self._deep_scan_enabled = QCheckBox("Enable hourly deep scan")
+        self._deep_scan_enabled.setChecked(
+            self._settings.get("scanner_deep_scan_enabled", False)
         )
-        layout.addWidget(self._daily_scan_enabled)
+        deep_form.addRow(self._deep_scan_enabled)
 
-        form = QFormLayout()
-        layout.addLayout(form)
-
-        self._daily_scan_time = QTimeEdit()
-        self._daily_scan_time.setDisplayFormat("HH:mm")
-        time_str = self._settings.get("scanner_daily_scan_time_et", "16:15")
-        try:
-            h, m = [int(x) for x in time_str.split(":")]
-        except (ValueError, AttributeError):
-            h, m = 16, 15
-        self._daily_scan_time.setTime(QTime(h, m))
-        form.addRow("Daily scan time (ET):", self._daily_scan_time)
-
-        layout.addSpacing(8)
-
-        # Weekly deep scan
-        self._weekly_scan_enabled = QCheckBox("Enable weekly deep scan")
-        self._weekly_scan_enabled.setChecked(
-            self._settings.get("scanner_weekly_scan_enabled", False)
+        self._deep_interval_spin = QSpinBox()
+        self._deep_interval_spin.setRange(1, 24)
+        self._deep_interval_spin.setSuffix(" hr")
+        self._deep_interval_spin.setValue(
+            self._settings.get("scanner_deep_scan_interval_hours", 1)
         )
-        layout.addWidget(self._weekly_scan_enabled)
+        deep_form.addRow("Run every:", self._deep_interval_spin)
 
-        form2 = QFormLayout()
-        layout.addLayout(form2)
+        self._deep_threshold_spin = QSpinBox()
+        self._deep_threshold_spin.setRange(0, 100)
+        self._deep_threshold_spin.setValue(
+            self._settings.get("scanner_deep_alert_threshold", 60)
+        )
+        deep_form.addRow("Alert threshold (score ≥):", self._deep_threshold_spin)
 
-        self._weekly_scan_time = QTimeEdit()
-        self._weekly_scan_time.setDisplayFormat("HH:mm")
-        wtime_str = self._settings.get("scanner_weekly_scan_time_et", "20:00")
-        try:
-            wh, wm = [int(x) for x in wtime_str.split(":")]
-        except (ValueError, AttributeError):
-            wh, wm = 20, 0
-        self._weekly_scan_time.setTime(QTime(wh, wm))
-        form2.addRow("Weekly scan time (ET):", self._weekly_scan_time)
+        layout.addWidget(deep_box)
 
-        layout.addSpacing(8)
+        # ── Complete Scan (scheduled, full universe) ──
+        complete_box = QGroupBox("Complete Scan  —  Full universe (up to 1500 stocks)")
+        complete_form = QFormLayout(complete_box)
 
-        # Universe size
-        form3 = QFormLayout()
-        layout.addLayout(form3)
+        self._complete_scan_enabled = QCheckBox("Enable scheduled complete scan")
+        self._complete_scan_enabled.setChecked(
+            self._settings.get("scanner_complete_scan_enabled", False)
+        )
+        complete_form.addRow(self._complete_scan_enabled)
+
+        self._complete_times_edit = QLineEdit(
+            self._settings.get("scanner_complete_scan_times_et", "09:00,13:00,16:15")
+        )
+        self._complete_times_edit.setPlaceholderText("e.g. 09:00,13:00,16:15")
+        complete_form.addRow("Run times ET (comma-separated):", self._complete_times_edit)
+
+        self._complete_threshold_spin = QSpinBox()
+        self._complete_threshold_spin.setRange(0, 100)
+        self._complete_threshold_spin.setValue(
+            self._settings.get("scanner_complete_alert_threshold", 60)
+        )
+        complete_form.addRow("Alert threshold (score ≥):", self._complete_threshold_spin)
 
         self._universe_spin = QSpinBox()
         self._universe_spin.setRange(50, 1500)
         self._universe_spin.setSingleStep(50)
-        self._universe_spin.setValue(self._settings.get("scanner_universe_size", 200))
-        form3.addRow("Universe size (top N S&P 500):", self._universe_spin)
+        self._universe_spin.setValue(self._settings.get("scanner_universe_size", 500))
+        complete_form.addRow("Universe size:", self._universe_spin)
+
+        layout.addWidget(complete_box)
 
         layout.addStretch()
 
         note = QLabel(
-            "Daily scan runs at the configured ET time Mon–Fri.\n"
-            "Weekly scan runs every Sunday at the configured ET time.\n"
-            "Universe pulls from S&P 500 + S&P 400 MidCap + S&P 600 SmallCap\n"
-            "+ NASDAQ 100 (deduplicated). Max ~1500 unique symbols."
+            "Universe: S&P 500 → S&P 400 MidCap → S&P 600 SmallCap → NASDAQ 100\n"
+            "(deduplicated, loaded in that order). Max ~1500 unique symbols.\n"
+            "All times are compared to local machine clock — keep machine in ET\n"
+            "or adjust times accordingly."
         )
         note.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(note)
@@ -252,8 +263,6 @@ class SettingsDialog(QDialog):
     # ── Save ──────────────────────────────────────────────────────────────────
 
     def _save_and_accept(self) -> None:
-        daily_t = self._daily_scan_time.time()
-        weekly_t = self._weekly_scan_time.time()
         self._settings.update({
             "poll_interval_seconds": self._poll_spin.value(),
             "cooldown_minutes": self._cooldown_spin.value(),
@@ -267,11 +276,12 @@ class SettingsDialog(QDialog):
             "email_password": self._email_pass.text(),
             "email_to": self._email_to.text().strip(),
             "telegram_command_polling_enabled": self._cmd_polling_enabled.isChecked(),
-            "scanner_daily_scan_enabled": self._daily_scan_enabled.isChecked(),
-            "scanner_daily_scan_time_et": f"{daily_t.hour():02d}:{daily_t.minute():02d}",
-            "scanner_weekly_scan_enabled": self._weekly_scan_enabled.isChecked(),
-            "scanner_weekly_scan_day": 6,
-            "scanner_weekly_scan_time_et": f"{weekly_t.hour():02d}:{weekly_t.minute():02d}",
+            "scanner_deep_scan_enabled": self._deep_scan_enabled.isChecked(),
+            "scanner_deep_scan_interval_hours": self._deep_interval_spin.value(),
+            "scanner_deep_alert_threshold": self._deep_threshold_spin.value(),
+            "scanner_complete_scan_enabled": self._complete_scan_enabled.isChecked(),
+            "scanner_complete_scan_times_et": self._complete_times_edit.text().strip(),
+            "scanner_complete_alert_threshold": self._complete_threshold_spin.value(),
             "scanner_universe_size": self._universe_spin.value(),
         })
         save_settings(self._settings)

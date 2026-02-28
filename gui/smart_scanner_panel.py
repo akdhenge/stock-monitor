@@ -36,6 +36,8 @@ class SmartScannerPanel(QWidget):
     request_quick_scan = pyqtSignal()
     # Emitted when user requests a deep scan
     request_deep_scan = pyqtSignal()
+    # Emitted when user requests a complete scan
+    request_complete_scan = pyqtSignal()
     # Emitted when user cancels an active scan
     request_cancel_scan = pyqtSignal()
 
@@ -60,6 +62,10 @@ class SmartScannerPanel(QWidget):
         self._deep_btn = QPushButton("Deep Scan")
         self._deep_btn.clicked.connect(self.request_deep_scan.emit)
         top_row.addWidget(self._deep_btn)
+
+        self._complete_btn = QPushButton("Complete Scan")
+        self._complete_btn.clicked.connect(self.request_complete_scan.emit)
+        top_row.addWidget(self._complete_btn)
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setEnabled(False)
@@ -121,6 +127,7 @@ class SmartScannerPanel(QWidget):
         self._progress_bar.setVisible(True)
         self._quick_btn.setEnabled(False)
         self._deep_btn.setEnabled(False)
+        self._complete_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
 
     def set_scan_idle(self, mode_label: str = "") -> None:
@@ -130,6 +137,7 @@ class SmartScannerPanel(QWidget):
         self._progress_bar.setVisible(False)
         self._quick_btn.setEnabled(True)
         self._deep_btn.setEnabled(True)
+        self._complete_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
 
     def update_progress(self, pct: int) -> None:

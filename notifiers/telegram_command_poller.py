@@ -30,7 +30,9 @@ class TelegramCommandPoller(QThread):
     # reply_chat_id
     cmd_scan = pyqtSignal(str)
     # reply_chat_id
-    cmd_top = pyqtSignal(str)
+    cmd_top    = pyqtSignal(str)
+    # reply_chat_id — full detailed table
+    cmd_detail = pyqtSignal(str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -109,11 +111,13 @@ class TelegramCommandPoller(QThread):
             self.cmd_scan.emit(reply_chat_id)
         elif cmd == "/top":
             self.cmd_top.emit(reply_chat_id)
+        elif cmd == "/detail":
+            self.cmd_detail.emit(reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
                 reply_chat_id,
-                "Unknown command. Available: /add /remove /list /scan /top",
+                "Unknown command. Available: /add /remove /list /scan /top /detail",
             )
 
     def _handle_add(self, parts: list, reply_chat_id: str) -> None:

@@ -19,11 +19,14 @@ _DEFAULTS: Dict[str, Any] = {
     "email_to": "",
     "telegram_command_polling_enabled": False,
     "scanner_universe_size": 500,
-    "scanner_daily_scan_enabled": False,
-    "scanner_weekly_scan_enabled": False,
-    "scanner_daily_scan_time_et": "16:15",
-    "scanner_weekly_scan_day": 6,
-    "scanner_weekly_scan_time_et": "20:00",
+    # Deep scan (S&P 500 only, hourly)
+    "scanner_deep_scan_enabled": False,
+    "scanner_deep_scan_interval_hours": 1,
+    "scanner_deep_alert_threshold": 60,
+    # Complete scan (full universe, scheduled times)
+    "scanner_complete_scan_enabled": False,
+    "scanner_complete_scan_times_et": "09:00,13:00,16:15",
+    "scanner_complete_alert_threshold": 60,
 }
 
 
