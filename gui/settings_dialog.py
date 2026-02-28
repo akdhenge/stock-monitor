@@ -217,7 +217,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(form3)
 
         self._universe_spin = QSpinBox()
-        self._universe_spin.setRange(50, 500)
+        self._universe_spin.setRange(50, 1500)
         self._universe_spin.setSingleStep(50)
         self._universe_spin.setValue(self._settings.get("scanner_universe_size", 200))
         form3.addRow("Universe size (top N S&P 500):", self._universe_spin)
@@ -227,7 +227,8 @@ class SettingsDialog(QDialog):
         note = QLabel(
             "Daily scan runs at the configured ET time Mon–Fri.\n"
             "Weekly scan runs every Sunday at the configured ET time.\n"
-            "Universe size controls how many S&P 500 stocks are screened."
+            "Universe pulls from S&P 500 + S&P 400 MidCap + S&P 600 SmallCap\n"
+            "+ NASDAQ 100 (deduplicated). Max ~1500 unique symbols."
         )
         note.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(note)

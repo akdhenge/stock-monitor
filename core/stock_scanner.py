@@ -13,13 +13,41 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from core.scan_result import ScanResult
 
-# Fallback universe if Wikipedia fetch fails
+# Fallback universe if all Wikipedia fetches fail
 _FALLBACK_SYMBOLS = [
+    # S&P 500 large-caps
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "V",
     "JNJ", "UNH", "XOM", "PG", "MA", "HD", "CVX", "MRK", "LLY", "ABBV",
     "PEP", "KO", "BAC", "COST", "AVGO", "MCD", "TMO", "CSCO", "ACN", "WMT",
     "ABT", "DHR", "TXN", "NEE", "CRM", "VZ", "PM", "INTC", "RTX", "BMY",
     "AMGN", "INTU", "HON", "QCOM", "T", "IBM", "GS", "CAT", "BA", "GE",
+    # S&P 400 mid-caps
+    "EXR", "ALLE", "AFG", "AYI", "BKH", "BC", "BIO", "BRX", "CASY", "CLH",
+    "CMC", "CNX", "COLB", "CRUS", "CW", "DKS", "EAT", "EFC", "EME", "ENVA",
+    "EXPO", "FAF", "FHN", "FR", "GATX", "GGG", "GPI", "HHC", "HLI", "HQY",
+    "IDXX", "IEX", "ITT", "JWN", "KBH", "KNX", "LNW", "M", "MAN", "MDC",
+    "MKL", "MOG-A", "MSA", "MSM", "MTZ", "NVT", "OGE", "ORI", "PNFP", "PNM",
+    # S&P 600 small-caps
+    "ABM", "ACAD", "AEIS", "ALEX", "AMBC", "AMSF", "ANDE", "ANF", "AOSL", "APOG",
+    "AROC", "ASTH", "AVA", "AWR", "BL", "BMBL", "BOX", "BRC", "CADE", "CAKE",
+    "CALM", "CAMT", "CASH", "CCOI", "CENT", "CEVA", "CHCO", "CHDN", "CLB", "CLFD",
+    "COKE", "CONN", "COOK", "CPRX", "CRGY", "CSGS", "CSWI", "DORM", "DRQ", "ECPG",
+    "ENS", "EPAC", "ETD", "EVRI", "FCFS", "FELE", "FLGT", "FULT", "GRBK", "HALO",
+    # NASDAQ 100 extras (not already in S&P 500)
+    "ADBE", "ADP", "ADSK", "ALGN", "ANSS", "CDNS", "CTAS", "DXCM", "EA", "EBAY",
+    "FAST", "FTNT", "GEHC", "GILD", "HON", "IDXX", "ILMN", "KDP", "KLAC", "LRCX",
+    "MCHP", "MDLZ", "MNST", "MRNA", "MRVL", "MTCH", "MU", "NXPI", "ODFL", "ON",
+    "ORLY", "PANW", "PAYX", "PCAR", "PDD", "REGN", "ROST", "SBUX", "SGEN", "SNPS",
+    "TEAM", "TMUS", "TTWO", "TXN", "VRSK", "VRSN", "VRTX", "WBA", "WBD", "XEL",
+]
+
+# Wikipedia URLs for each index
+_INDEX_SOURCES = [
+    # (url, table_index, symbol_column)
+    ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 0, "Symbol"),
+    ("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 0, "Symbol"),
+    ("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies", 0, "Symbol"),
+    ("https://en.wikipedia.org/wiki/Nasdaq-100", 4, "Ticker"),
 ]
 
 
@@ -65,19 +93,45 @@ class StockScanner(QThread):
 
     # ── Universe ──────────────────────────────────────────────────────────────
 
-    def fetch_universe(self, size: int = 200) -> List[str]:
-        """Return list of S&P 500 symbols (up to `size`) from Wikipedia."""
-        try:
-            import pandas as pd
-            tables = pd.read_html(
-                "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-            )
-            symbols = tables[0]["Symbol"].tolist()
-            # Fix BRK.B → BRK-B style
-            symbols = [str(s).replace(".", "-") for s in symbols]
-            return symbols[:size]
-        except Exception:
+    def fetch_universe(self, size: int = 500) -> List[str]:
+        """
+        Return a deduplicated list of stock symbols (up to `size`) pulled from:
+          - S&P 500  (~500 stocks)
+          - S&P 400 MidCap (~400 stocks)
+          - S&P 600 SmallCap (~600 stocks)
+          - NASDAQ 100 (~100 stocks, mostly overlaps with S&P 500)
+        Combined ceiling: ~1500 unique symbols.
+        Falls back to hardcoded list if all sources fail.
+        """
+        import pandas as pd
+
+        seen = set()
+        combined: List[str] = []
+
+        for url, tbl_idx, col in _INDEX_SOURCES:
+            if len(combined) >= size:
+                break
+            try:
+                tables = pd.read_html(url)
+                raw = tables[tbl_idx][col].tolist()
+                for sym in raw:
+                    sym = str(sym).replace(".", "-").strip().upper()
+                    if sym and sym not in seen:
+                        seen.add(sym)
+                        combined.append(sym)
+                        if len(combined) >= size:
+                            break
+                self.scan_status.emit(
+                    f"Universe: {len(combined)} symbols loaded so far…"
+                )
+            except Exception:
+                # If one source fails, continue with the rest
+                continue
+
+        if not combined:
             return _FALLBACK_SYMBOLS[:size]
+
+        return combined[:size]
 
     # ── Mode 1: Quick Scan ────────────────────────────────────────────────────
 
@@ -165,10 +219,10 @@ class StockScanner(QThread):
         if self._candidates is not None:
             symbols = self._candidates
         else:
-            # Fall back to running a quick filter first
-            self.scan_status.emit("No candidates supplied — running quick filter…")
+            # Fall back: run a quick filter pass first to get candidates
+            self.scan_status.emit("No candidates supplied — running quick filter first…")
             universe = self.fetch_universe(self._universe_size)
-            symbols = universe[:50]  # Limit for standalone deep scan
+            symbols = universe
 
         total = len(symbols)
         if total == 0:
