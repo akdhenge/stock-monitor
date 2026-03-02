@@ -48,6 +48,10 @@ class MainWindow(QMainWindow):
         self._last_deep_scan_dt: Optional[datetime] = None
         self._last_complete_scan_hhmm: str = ""   # prevents double-fire within same minute
 
+        # Daily summary tracking (resets on app restart or date rollover)
+        self._complete_summary_sent_date: Optional[str] = None
+        self._deep_summary_sent_date: Optional[str] = None
+
         # Command poller
         self._cmd_poller = None
 
@@ -335,6 +339,12 @@ class MainWindow(QMainWindow):
                         f"Sector: {r.sector or '—'}"
                     )
 
+            # Once-daily deep scan summary
+            today = datetime.now().strftime("%Y-%m-%d")
+            if self._deep_summary_sent_date != today:
+                self._send_deep_scan_summary(results, token, chat_id)
+                self._deep_summary_sent_date = today
+
         self._scanner_prev_scores = {r.symbol: r.total_score for r in results}
         self._scan_status_label.setText(
             f"Deep scan: {len(results)} scored  ({datetime.now().strftime('%H:%M')})"
@@ -376,8 +386,11 @@ class MainWindow(QMainWindow):
                         f"Sector: {r.sector or '—'}"
                     )
 
-            # Simplified daily summary (top 10)
-            self._send_complete_scan_summary(results, token, chat_id)
+            # Once-daily summary (top 10)
+            today = datetime.now().strftime("%Y-%m-%d")
+            if self._complete_summary_sent_date != today:
+                self._send_complete_scan_summary(results, token, chat_id)
+                self._complete_summary_sent_date = today
 
         self._scanner_prev_scores = {r.symbol: r.total_score for r in results}
         self._scan_status_label.setText(
@@ -405,6 +418,34 @@ class MainWindow(QMainWindow):
         top10 = results[:10]
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         lines = [f"📊 <b>Complete Scan Summary</b> — {now_str} ET\n"]
+        prev = self._scanner_prev_scores
+
+        for i, r in enumerate(top10, 1):
+            prev_score = prev.get(r.symbol, None)
+            if prev_score is None:
+                tag = " 🆕"
+            elif r.total_score > prev_score + 1:
+                tag = " ↑"
+            elif r.total_score < prev_score - 1:
+                tag = " ↓"
+            else:
+                tag = ""
+            color = "🟢" if r.total_score >= 65 else "🟡" if r.total_score >= 50 else "🟠"
+            lines.append(
+                f"{i}. {color} <b>{r.symbol}</b>  {r.total_score}{tag}"
+                f"  <i>{r.sector or '—'}</i>"
+            )
+
+        lines.append("\nSend /detail for full breakdown table.")
+        TelegramNotifier.send_message(token, chat_id, "\n".join(lines))
+
+    def _send_deep_scan_summary(
+        self, results: List[ScanResult], token: str, chat_id: str
+    ) -> None:
+        """Send a once-daily top-10 summary after a deep scan."""
+        top10 = results[:10]
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        lines = [f"🔎 <b>Deep Scan Summary</b> — {now_str} ET\n"]
         prev = self._scanner_prev_scores
 
         for i, r in enumerate(top10, 1):
