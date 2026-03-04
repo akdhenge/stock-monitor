@@ -230,7 +230,6 @@ class StockScanner(QThread):
             return
 
         results.sort(key=lambda x: x.total_score, reverse=True)
-        top20 = results[:20]
 
         # Alert: new top-10 entry
         new_top10 = {r.symbol for r in results[:10]}
@@ -243,12 +242,14 @@ class StockScanner(QThread):
         # Emit all results; MainWindow filters by threshold against previous_scores
         self._previous_scores = {r.symbol: r.total_score for r in results}
 
+        top_result = results[0] if results else None
         self.scan_progress.emit(100)
         self.scan_status.emit(
             f"Deep scan complete — {len(results)} scored, "
-            f"top: {top20[0].symbol if top20 else 'N/A'} ({top20[0].total_score if top20 else 0})"
+            f"top: {top_result.symbol if top_result else 'N/A'} "
+            f"({top_result.total_score if top_result else 0})"
         )
-        self.deep_scan_complete.emit(top20)
+        self.deep_scan_complete.emit(results)
 
     # ── Mode 3: Complete Scan (full universe, scheduled) ─────────────────────
 
@@ -261,7 +262,6 @@ class StockScanner(QThread):
             return
 
         results.sort(key=lambda x: x.total_score, reverse=True)
-        top20 = results[:20]
 
         # Alert: new top-5 entry
         new_top5 = {r.symbol for r in results[:5]}
@@ -276,12 +276,14 @@ class StockScanner(QThread):
         # Store scores for threshold diffing (MainWindow handles Telegram)
         self._previous_scores = {r.symbol: r.total_score for r in results}
 
+        top_result = results[0] if results else None
         self.scan_progress.emit(100)
         self.scan_status.emit(
             f"Complete scan done — {len(results)} scored, "
-            f"top: {top20[0].symbol if top20 else 'N/A'} ({top20[0].total_score if top20 else 0})"
+            f"top: {top_result.symbol if top_result else 'N/A'} "
+            f"({top_result.total_score if top_result else 0})"
         )
-        self.complete_scan_complete.emit(top20)
+        self.complete_scan_complete.emit(results)
 
     # ── Shared full-scoring pipeline ──────────────────────────────────────────
 

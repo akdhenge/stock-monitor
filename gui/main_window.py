@@ -16,6 +16,7 @@ from core.settings_store import load_settings
 from core.stock_scanner import StockScanner
 from core.watchlist_store import load_watchlist, save_watchlist
 from gui.add_edit_dialog import AddEditDialog
+from gui.ai_research_dialog import AIResearchDialog
 from gui.alert_history_panel import AlertHistoryPanel
 from gui.settings_dialog import SettingsDialog
 from gui.smart_scanner_panel import SmartScannerPanel
@@ -54,6 +55,9 @@ class MainWindow(QMainWindow):
 
         # Command poller
         self._cmd_poller = None
+
+        # AI Research dialogs — hold references so they are not garbage-collected
+        self._ai_dialogs: List[AIResearchDialog] = []
 
         self._setup_ui()
         self._apply_settings(self._settings)
@@ -136,6 +140,7 @@ class MainWindow(QMainWindow):
         self._scanner_panel.request_complete_scan.connect(self._trigger_complete_scan)
         self._scanner_panel.request_cancel_scan.connect(self._cancel_scan)
         self._scanner_panel.add_to_watchlist.connect(self._add_scanner_results)
+        self._scanner_panel.research_requested.connect(self._on_research_requested)
         self._tabs.addTab(self._scanner_panel, "Smart Scanner")
 
         # Split status bar
@@ -661,6 +666,15 @@ class MainWindow(QMainWindow):
                 self, "Added to Watchlist",
                 "All selected stocks are already in the watchlist."
             )
+
+    def _on_research_requested(self, symbol: str) -> None:
+        scan_result = next(
+            (r for r in self._scanner_panel._results if r.symbol == symbol), None
+        )
+        dlg = AIResearchDialog(symbol, scan_result, self._settings, parent=self)
+        self._ai_dialogs.append(dlg)
+        dlg.finished.connect(lambda _: self._ai_dialogs.remove(dlg) if dlg in self._ai_dialogs else None)
+        dlg.show()
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(parent=self)

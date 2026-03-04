@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QSpinBox, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
@@ -27,6 +27,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_telegram_tab(), "Telegram")
         tabs.addTab(self._build_email_tab(), "Email")
         tabs.addTab(self._build_scanner_tab(), "Scanner")
+        tabs.addTab(self._build_ai_tab(), "AI")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save_and_accept)
@@ -246,6 +247,75 @@ class SettingsDialog(QDialog):
 
         return w
 
+    # ── AI Tab ────────────────────────────────────────────────────────────────
+
+    def _build_ai_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(10)
+
+        # Provider selector
+        provider_form = QFormLayout()
+        self._ai_provider_combo = QComboBox()
+        self._ai_provider_combo.addItem("Ollama (local, free)", "ollama")
+        self._ai_provider_combo.addItem("Claude API (Anthropic)", "claude")
+        current_provider = self._settings.get("ai_provider", "ollama")
+        idx = self._ai_provider_combo.findData(current_provider)
+        if idx >= 0:
+            self._ai_provider_combo.setCurrentIndex(idx)
+        provider_form.addRow("AI Provider:", self._ai_provider_combo)
+        layout.addLayout(provider_form)
+
+        # Ollama group
+        ollama_box = QGroupBox("Ollama (local LLM)")
+        ollama_form = QFormLayout(ollama_box)
+
+        self._ollama_url = QLineEdit(
+            self._settings.get("ai_ollama_url", "http://localhost:11434/api/generate")
+        )
+        ollama_form.addRow("API URL:", self._ollama_url)
+
+        self._ollama_model = QLineEdit(
+            self._settings.get("ai_ollama_model", "mistral")
+        )
+        self._ollama_model.setPlaceholderText("e.g. mistral, llama3, gemma")
+        ollama_form.addRow("Model name:", self._ollama_model)
+
+        layout.addWidget(ollama_box)
+
+        # Claude API group
+        claude_box = QGroupBox("Claude API (Anthropic)")
+        claude_form = QFormLayout(claude_box)
+
+        self._claude_api_key = QLineEdit(
+            self._settings.get("ai_claude_api_key", "")
+        )
+        self._claude_api_key.setEchoMode(QLineEdit.Password)
+        self._claude_api_key.setPlaceholderText("sk-ant-…")
+        claude_form.addRow("API Key:", self._claude_api_key)
+
+        self._claude_model = QLineEdit(
+            self._settings.get("ai_claude_model", "claude-haiku-20240307")
+        )
+        self._claude_model.setPlaceholderText("e.g. claude-haiku-20240307")
+        claude_form.addRow("Model:", self._claude_model)
+
+        layout.addWidget(claude_box)
+
+        layout.addStretch()
+
+        note = QLabel(
+            "Ollama setup: install from https://ollama.com, then run:\n"
+            "  ollama pull mistral     (one-time ~4 GB download)\n"
+            "Ollama runs fully on your local machine — no API key needed.\n\n"
+            "Claude API: get a key at https://console.anthropic.com\n"
+            "Note: this uses the Anthropic API (paid), not a Claude Pro subscription."
+        )
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        return w
+
     def _test_email(self) -> None:
         notifier = EmailNotifier(
             smtp_host=self._smtp_host.text().strip(),
@@ -283,6 +353,11 @@ class SettingsDialog(QDialog):
             "scanner_complete_scan_times_et": self._complete_times_edit.text().strip(),
             "scanner_complete_alert_threshold": self._complete_threshold_spin.value(),
             "scanner_universe_size": self._universe_spin.value(),
+            "ai_provider":       self._ai_provider_combo.currentData(),
+            "ai_ollama_url":     self._ollama_url.text().strip(),
+            "ai_ollama_model":   self._ollama_model.text().strip(),
+            "ai_claude_api_key": self._claude_api_key.text().strip(),
+            "ai_claude_model":   self._claude_model.text().strip(),
         })
         save_settings(self._settings)
         self.accept()

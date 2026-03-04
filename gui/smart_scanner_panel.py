@@ -40,6 +40,8 @@ class SmartScannerPanel(QWidget):
     request_complete_scan = pyqtSignal()
     # Emitted when user cancels an active scan
     request_cancel_scan = pyqtSignal()
+    # Emitted when user clicks "AI Research" with exactly 1 row selected
+    research_requested = pyqtSignal(str)  # symbol
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,6 +104,7 @@ class SmartScannerPanel(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.verticalHeader().setVisible(False)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._table, stretch=1)
 
         # --- Bottom action row ---
@@ -114,6 +117,11 @@ class SmartScannerPanel(QWidget):
         self._export_btn = QPushButton("Export CSV")
         self._export_btn.clicked.connect(self._on_export_csv)
         bottom_row.addWidget(self._export_btn)
+
+        self._research_btn = QPushButton("AI Research")
+        self._research_btn.setEnabled(False)
+        self._research_btn.clicked.connect(self._on_research_clicked)
+        bottom_row.addWidget(self._research_btn)
 
         bottom_row.addStretch()
         layout.addLayout(bottom_row)
@@ -248,6 +256,19 @@ class SmartScannerPanel(QWidget):
 
         if selected_results:
             self.add_to_watchlist.emit(selected_results)
+
+    def _on_selection_changed(self) -> None:
+        selected_rows = {index.row() for index in self._table.selectedIndexes()}
+        self._research_btn.setEnabled(len(selected_rows) == 1)
+
+    def _on_research_clicked(self) -> None:
+        selected_rows = {index.row() for index in self._table.selectedIndexes()}
+        if len(selected_rows) != 1:
+            return
+        row = next(iter(selected_rows))
+        sym_item = self._table.item(row, _COL_IDX["Symbol"])
+        if sym_item:
+            self.research_requested.emit(sym_item.text())
 
     def _on_export_csv(self) -> None:
         if not self._results:

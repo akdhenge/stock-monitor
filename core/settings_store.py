@@ -27,6 +27,12 @@ _DEFAULTS: Dict[str, Any] = {
     "scanner_complete_scan_enabled": False,
     "scanner_complete_scan_times_et": "09:00,13:00,16:15",
     "scanner_complete_alert_threshold": 60,
+    # AI Research
+    "ai_provider":       "ollama",
+    "ai_ollama_url":     "http://localhost:11434/api/generate",
+    "ai_ollama_model":   "qwen3-coder:30b",
+    "ai_claude_api_key": "",
+    "ai_claude_model":   "claude-haiku-20240307",
 }
 
 
