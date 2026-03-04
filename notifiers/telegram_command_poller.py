@@ -7,6 +7,7 @@ Accepted commands:
   /list
   /scan
   /top
+  /aiscan SYMBOL
 """
 from typing import Optional
 
@@ -33,6 +34,8 @@ class TelegramCommandPoller(QThread):
     cmd_top    = pyqtSignal(str)
     # reply_chat_id — full detailed table
     cmd_detail = pyqtSignal(str)
+    # symbol, reply_chat_id
+    cmd_aiscan = pyqtSignal(str, str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -113,11 +116,13 @@ class TelegramCommandPoller(QThread):
             self.cmd_top.emit(reply_chat_id)
         elif cmd == "/detail":
             self.cmd_detail.emit(reply_chat_id)
+        elif cmd == "/aiscan":
+            self._handle_aiscan(parts, reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
                 reply_chat_id,
-                "Unknown command. Available: /add /remove /list /scan /top /detail",
+                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan",
             )
 
     def _handle_add(self, parts: list, reply_chat_id: str) -> None:
@@ -154,3 +159,15 @@ class TelegramCommandPoller(QThread):
             return
         symbol = parts[1].upper()
         self.cmd_remove.emit(symbol, reply_chat_id)
+
+    def _handle_aiscan(self, parts: list, reply_chat_id: str) -> None:
+        # /aiscan SYMBOL
+        if len(parts) < 2:
+            TelegramNotifier.send_message(
+                self._token,
+                reply_chat_id,
+                "Usage: /aiscan SYMBOL",
+            )
+            return
+        symbol = parts[1].upper()
+        self.cmd_aiscan.emit(symbol, reply_chat_id)

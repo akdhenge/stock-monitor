@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
+from core.ai_researcher import AIResearcher
 from core.alert_manager import AlertManager
 from core.models import AlertRecord, StockEntry
 from core.price_poller import PricePoller
@@ -58,6 +59,9 @@ class MainWindow(QMainWindow):
 
         # AI Research dialogs — hold references so they are not garbage-collected
         self._ai_dialogs: List[AIResearchDialog] = []
+
+        # AI Research threads from Telegram /aiscan — prevent GC
+        self._ai_researchers: List[AIResearcher] = []
 
         self._setup_ui()
         self._apply_settings(self._settings)
@@ -180,6 +184,7 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_scan.connect(self._on_cmd_scan)
         self._cmd_poller.cmd_top.connect(self._on_cmd_top)
         self._cmd_poller.cmd_detail.connect(self._on_cmd_detail)
+        self._cmd_poller.cmd_aiscan.connect(self._on_cmd_aiscan)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -579,6 +584,61 @@ class MainWindow(QMainWindow):
             chunk: List[str] = [lines[0]]
             for line in lines[1:]:
                 if sum(len(l) for l in chunk) + len(line) > 3800:
+                    TelegramNotifier.send_message(token, reply_chat_id, "\n".join(chunk))
+                    chunk = []
+                chunk.append(line)
+            if chunk:
+                TelegramNotifier.send_message(token, reply_chat_id, "\n".join(chunk))
+
+    def _on_cmd_aiscan(self, symbol: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        TelegramNotifier.send_message(
+            token, reply_chat_id,
+            f"Starting AI research for <b>{symbol}</b>..."
+        )
+
+        # Look up ScanResult for the symbol (may be None — that's fine)
+        results = load_scan_results()
+        scan_result = next((r for r in results if r.symbol == symbol), None) if results else None
+
+        researcher = AIResearcher(symbol, scan_result, self._settings, force_refresh=True)
+        researcher.research_complete.connect(
+            lambda result, cid=reply_chat_id: self._send_aiscan_telegram(result, cid)
+        )
+        researcher.research_error.connect(
+            lambda err, cid=reply_chat_id: TelegramNotifier.send_message(
+                self._settings.get("telegram_token", ""), cid, f"AI Research error: {err}"
+            )
+        )
+        researcher.finished.connect(
+            lambda r=researcher: self._ai_researchers.remove(r) if r in self._ai_researchers else None
+        )
+        self._ai_researchers.append(researcher)
+        researcher.start()
+
+    def _send_aiscan_telegram(self, result: dict, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        sentiment = result.get("sentiment", "NEUTRAL")
+        emoji = {"BULLISH": "\U0001f7e2", "BEARISH": "\U0001f534", "NEUTRAL": "\U0001f7e1"}.get(
+            sentiment, "\U0001f7e1"
+        )
+        lines = [
+            f"{emoji} <b>AI Research: {result.get('symbol', '?')}</b>  ({sentiment})\n",
+            f"<b>Short-Term:</b> {result.get('short_term', 'N/A')}",
+            f"<b>Long-Term:</b> {result.get('long_term', 'N/A')}",
+            f"<b>Catalysts:</b> {result.get('catalysts', 'N/A')}",
+            f"<b>Summary:</b> {result.get('summary', 'N/A')}",
+            f"\n<i>Source: {result.get('source', '?')} | {result.get('timestamp', '')}</i>",
+        ]
+        msg = "\n".join(lines)
+
+        if len(msg) <= 4096:
+            TelegramNotifier.send_message(token, reply_chat_id, msg)
+        else:
+            # Split into chunks that fit the Telegram limit
+            chunk: List[str] = [lines[0]]
+            for line in lines[1:]:
+                if sum(len(l) for l in chunk) + len(line) + len(chunk) > 3800:
                     TelegramNotifier.send_message(token, reply_chat_id, "\n".join(chunk))
                     chunk = []
                 chunk.append(line)
