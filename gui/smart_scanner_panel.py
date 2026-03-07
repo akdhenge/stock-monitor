@@ -18,7 +18,7 @@ from core.scan_result import ScanResult
 
 _COLS = [
     "#", "Symbol", "Total", "Value", "Growth", "Tech",
-    "P/E", "PEG", "D/E", "RevGrow%", "ROE%", "RSI",
+    "P/E", "PEG", "D/E", "RevGrow%", "ROE%", "RSI", "AI Rank",
 ]
 _COL_IDX = {name: i for i, name in enumerate(_COLS)}
 
@@ -162,6 +162,31 @@ class SmartScannerPanel(QWidget):
         )
         self._populate_table(results)
 
+    def update_ai_rank(self, symbol: str, score: Optional[float]) -> None:
+        """Update the AI Rank cell for a given symbol.
+
+        Args:
+            symbol: Ticker symbol to update.
+            score: Composite rank (1.0-10.0), or None to show 'ERR'.
+        """
+        col = _COL_IDX["AI Rank"]
+        for row in range(self._table.rowCount()):
+            sym_item = self._table.item(row, _COL_IDX["Symbol"])
+            if sym_item and sym_item.text() == symbol:
+                if score is None:
+                    item = QTableWidgetItem("ERR")
+                    item.setData(Qt.UserRole, 0.0)
+                else:
+                    item = QTableWidgetItem(f"{score:.1f}")
+                    item.setData(Qt.UserRole, float(score))
+                item.setTextAlignment(Qt.AlignCenter)
+                # Preserve existing row background color
+                existing = self._table.item(row, 0)
+                if existing:
+                    item.setBackground(existing.background())
+                self._table.setItem(row, col, item)
+                break
+
     # ── Table ─────────────────────────────────────────────────────────────────
 
     def _populate_table(self, results: List[ScanResult]) -> None:
@@ -192,6 +217,10 @@ class SmartScannerPanel(QWidget):
                 item.setTextAlignment(Qt.AlignCenter)
                 return item
 
+            ai_rank_item = QTableWidgetItem("--")
+            ai_rank_item.setData(Qt.UserRole, 0.0)
+            ai_rank_item.setTextAlignment(Qt.AlignCenter)
+
             items = [
                 QTableWidgetItem(str(rank)),
                 QTableWidgetItem(r.symbol),
@@ -205,6 +234,7 @@ class SmartScannerPanel(QWidget):
                 _pct_item(r.revenue_growth),
                 _pct_item(r.roe),
                 _num_item(r.rsi, fmt="{:.0f}"),
+                ai_rank_item,
             ]
             items[0].setTextAlignment(Qt.AlignCenter)
             items[1].setTextAlignment(Qt.AlignCenter)
@@ -291,10 +321,22 @@ class SmartScannerPanel(QWidget):
                     "Rank", "Symbol", "Total", "Value", "Growth", "Tech",
                     "P/E", "PEG", "D/E", "RevGrow%", "ROE%", "RSI",
                     "Sector", "Price", "52wkHigh", "Mode", "Timestamp",
+                    "AI Rank",
                 ])
                 for rank, r in enumerate(self._results, start=1):
                     def _pct(v):
                         return f"{v * 100:.2f}%" if v is not None else ""
+
+                    # Look up AI Rank from table cell
+                    ai_rank_val = ""
+                    ai_col = _COL_IDX["AI Rank"]
+                    for row in range(self._table.rowCount()):
+                        sym_item = self._table.item(row, _COL_IDX["Symbol"])
+                        if sym_item and sym_item.text() == r.symbol:
+                            cell = self._table.item(row, ai_col)
+                            if cell and cell.text() not in ("--", "ERR"):
+                                ai_rank_val = cell.text()
+                            break
 
                     writer.writerow([
                         rank, r.symbol,
@@ -304,6 +346,7 @@ class SmartScannerPanel(QWidget):
                         r.rsi or "",
                         r.sector or "", r.price or "", r.week52_high or "",
                         r.scan_mode, r.timestamp.isoformat(),
+                        ai_rank_val,
                     ])
             QMessageBox.information(
                 self, "Export CSV", f"Exported {len(self._results)} rows to:\n{path}"

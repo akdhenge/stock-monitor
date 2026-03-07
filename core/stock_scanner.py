@@ -242,6 +242,9 @@ class StockScanner(QThread):
         # Emit all results; MainWindow filters by threshold against previous_scores
         self._previous_scores = {r.symbol: r.total_score for r in results}
 
+        # Keep only top 30 results
+        results = results[:30]
+
         top_result = results[0] if results else None
         self.scan_progress.emit(100)
         self.scan_status.emit(
@@ -275,6 +278,9 @@ class StockScanner(QThread):
 
         # Store scores for threshold diffing (MainWindow handles Telegram)
         self._previous_scores = {r.symbol: r.total_score for r in results}
+
+        # Keep only top 30 results
+        results = results[:30]
 
         top_result = results[0] if results else None
         self.scan_progress.emit(100)

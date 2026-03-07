@@ -63,6 +63,11 @@ class MainWindow(QMainWindow):
         # AI Research threads from Telegram /aiscan — prevent GC
         self._ai_researchers: List[AIResearcher] = []
 
+        # Auto AI ranking state (top 10 after deep/complete scans)
+        self._ai_rank_researchers: List[AIResearcher] = []
+        self._ai_rank_pending: int = 0
+        self._ai_rank_results: Dict[str, float] = {}  # symbol -> rank
+
         self._setup_ui()
         self._apply_settings(self._settings)
         self._watchlist_table.refresh(self._watchlist)
@@ -298,6 +303,15 @@ class MainWindow(QMainWindow):
             self._scanner_top10 = {r.symbol for r in results[:10]}
             self._scanner_prev_scores = {r.symbol: r.total_score for r in results}
 
+            # Restore cached AI ranks for top 10
+            from core.ai_research_store import get_cached_entry
+            for r in results[:10]:
+                cached = get_cached_entry(r.symbol)
+                if cached:
+                    rank = self._compute_ai_rank(cached)
+                    self._ai_rank_results[r.symbol] = rank
+                    self._scanner_panel.update_ai_rank(r.symbol, rank)
+
     # ── Price Poller slots ────────────────────────────────────────────────────
 
     def _on_prices_updated(self, prices: Dict[str, float]) -> None:
@@ -360,6 +374,7 @@ class MainWindow(QMainWindow):
             f"Deep scan: {len(results)} scored  ({datetime.now().strftime('%H:%M')})"
         )
         save_scan_results(results)
+        self._start_auto_ai_ranking(results)
 
     def _on_deep_alert_entry(self, symbol: str, score: float) -> None:
         """Fired by scanner for new top-10 entries during deep scan."""
@@ -407,6 +422,7 @@ class MainWindow(QMainWindow):
             f"Complete scan: {len(results)} scored  ({datetime.now().strftime('%H:%M')})"
         )
         save_scan_results(results)
+        self._start_auto_ai_ranking(results)
 
     def _on_new_top5(
         self, symbol: str, total: float, value: float, growth: float, tech: float
@@ -476,6 +492,89 @@ class MainWindow(QMainWindow):
 
         lines.append("\nSend /detail for full breakdown table.")
         TelegramNotifier.send_message(token, chat_id, "\n".join(lines))
+
+    # ── Auto AI Ranking ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_ai_rank(result: dict) -> float:
+        """Compute a composite AI rank (1.0–10.0) from sentiment, direction, timeframe."""
+        sentiment_map = {"BULLISH": 3, "NEUTRAL": 2, "BEARISH": 1}
+        direction_map = {"UP": 3, "SIDEWAYS": 2, "DOWN": 1}
+
+        sentiment_score = sentiment_map.get(result.get("sentiment", "NEUTRAL"), 2)
+        direction_score = direction_map.get(result.get("direction", "SIDEWAYS"), 2)
+
+        # Timeframe: short-term keywords score higher
+        timeframe = (result.get("timeframe") or "").lower()
+        if any(kw in timeframe for kw in ("week", "days", "1-2", "2-4")):
+            timeframe_score = 3
+        elif any(kw in timeframe for kw in ("month", "1-3", "2-3")):
+            timeframe_score = 2
+        else:
+            timeframe_score = 1
+
+        raw = sentiment_score + direction_score + timeframe_score  # range [3, 9]
+        rank = 1.0 + (raw - 3) * 1.5  # maps [3,9] -> [1.0, 10.0]
+        return round(min(10.0, max(1.0, rank)), 1)
+
+    def _start_auto_ai_ranking(self, results: List[ScanResult]) -> None:
+        """Launch AI research for the top 10 scan results to compute AI ranks."""
+        # Stop any previously running rank researchers
+        for r in self._ai_rank_researchers:
+            if r.isRunning():
+                r.stop()
+                r.wait(2000)
+        self._ai_rank_researchers.clear()
+        self._ai_rank_pending = 0
+        self._ai_rank_results.clear()
+
+        top10 = results[:10]
+        if not top10:
+            return
+
+        self._ai_rank_pending = len(top10)
+        self._scan_status_label.setText(
+            f"AI ranking top {len(top10)} stocks... (0/{len(top10)})"
+        )
+
+        for r in top10:
+            researcher = AIResearcher(
+                r.symbol, r, self._settings, force_refresh=False, parent=None
+            )
+            researcher.research_complete.connect(
+                lambda result, sym=r.symbol: self._on_auto_rank_complete(sym, result)
+            )
+            researcher.research_error.connect(
+                lambda err, sym=r.symbol: self._on_auto_rank_error(sym, err)
+            )
+            self._ai_rank_researchers.append(researcher)
+            researcher.start()
+
+    def _on_auto_rank_complete(self, symbol: str, result: dict) -> None:
+        rank = self._compute_ai_rank(result)
+        self._ai_rank_results[symbol] = rank
+        self._scanner_panel.update_ai_rank(symbol, rank)
+        self._ai_rank_pending -= 1
+        total = len(self._ai_rank_researchers)
+        done = total - self._ai_rank_pending
+        if self._ai_rank_pending > 0:
+            self._scan_status_label.setText(
+                f"AI ranking top {total} stocks... ({done}/{total})"
+            )
+        else:
+            self._scan_status_label.setText(
+                f"AI ranking complete ({total}/{total})"
+            )
+
+    def _on_auto_rank_error(self, symbol: str, error: str) -> None:
+        self._scanner_panel.update_ai_rank(symbol, None)
+        self._ai_rank_pending -= 1
+        total = len(self._ai_rank_researchers)
+        done = total - self._ai_rank_pending
+        if self._ai_rank_pending <= 0:
+            self._scan_status_label.setText(
+                f"AI ranking complete ({done}/{total})"
+            )
 
     # ── Bot Command slots ─────────────────────────────────────────────────────
 
@@ -622,12 +721,19 @@ class MainWindow(QMainWindow):
         emoji = {"BULLISH": "\U0001f7e2", "BEARISH": "\U0001f534", "NEUTRAL": "\U0001f7e1"}.get(
             sentiment, "\U0001f7e1"
         )
+        direction = result.get("direction", "SIDEWAYS")
+        dir_emoji = {"UP": "\u2B06\uFE0F", "DOWN": "\u2B07\uFE0F", "SIDEWAYS": "\u27A1\uFE0F"}.get(
+            direction, "\u27A1\uFE0F"
+        )
         lines = [
             f"{emoji} <b>AI Research: {result.get('symbol', '?')}</b>  ({sentiment})\n",
             f"<b>Short-Term:</b> {result.get('short_term', 'N/A')}",
             f"<b>Long-Term:</b> {result.get('long_term', 'N/A')}",
             f"<b>Catalysts:</b> {result.get('catalysts', 'N/A')}",
-            f"<b>Summary:</b> {result.get('summary', 'N/A')}",
+            f"\n{dir_emoji} <b>Direction:</b> {direction}  |  <b>Timeframe:</b> {result.get('timeframe', 'N/A')}",
+            f"<b>Stock Strategy:</b> {result.get('stock_strategy', 'N/A')}",
+            f"<b>Options Strategy:</b> {result.get('options_strategy', 'N/A')}",
+            f"\n<b>Summary:</b> {result.get('summary', 'N/A')}",
             f"\n<i>Source: {result.get('source', '?')} | {result.get('timestamp', '')}</i>",
         ]
         msg = "\n".join(lines)
@@ -777,4 +883,10 @@ class MainWindow(QMainWindow):
         if self._scanner is not None and self._scanner.isRunning():
             self._scanner.stop()
             self._scanner.wait()
+        # Stop any running AI rank researchers
+        for r in self._ai_rank_researchers:
+            if r.isRunning():
+                r.stop()
+                r.wait(2000)
+        self._ai_rank_researchers.clear()
         event.accept()

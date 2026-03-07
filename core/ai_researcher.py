@@ -104,13 +104,22 @@ class AIResearcher(QThread):
         price_volume_data = self._fetch_price_volume_data(ticker)
         analyst_data = self._fetch_analyst_ratings(ticker)
         insider_data = self._fetch_insider_transactions(ticker)
+        options_data = self._fetch_options_data(ticker)
+
+        if not self._running:
+            return
+
+        # 4b. Fetch macro/sector news
+        sector = self._scan_result.sector if self._scan_result else None
+        macro_articles = self._fetch_macro_news(self._symbol, sector)
 
         if not self._running:
             return
 
         # 5. Build prompt
         prompt = self._build_prompt(
-            articles, price_volume_data, analyst_data, insider_data
+            articles, price_volume_data, analyst_data, insider_data,
+            options_data, macro_articles,
         )
 
         # 6. Call LLM
@@ -223,6 +232,130 @@ class AIResearcher(QThread):
         except Exception:
             return []
 
+    def _fetch_options_data(self, ticker) -> Dict[str, Any]:
+        """Fetch options chain for nearest 2 expiry dates."""
+        try:
+            expiry_dates = ticker.options
+            if not expiry_dates:
+                return {}
+            dates_to_fetch = expiry_dates[:2]
+            data: Dict[str, Any] = {
+                "expiries": [],
+                "total_call_oi": 0,
+                "total_put_oi": 0,
+                "iv_values": [],
+            }
+            for exp_date in dates_to_fetch:
+                try:
+                    chain = ticker.option_chain(exp_date)
+                except Exception:
+                    continue
+                calls = chain.calls
+                puts = chain.puts
+
+                call_oi = int(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
+                put_oi = int(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
+                data["total_call_oi"] += call_oi
+                data["total_put_oi"] += put_oi
+
+                # Collect IV values for averaging
+                if "impliedVolatility" in calls.columns:
+                    data["iv_values"].extend(calls["impliedVolatility"].dropna().tolist())
+                if "impliedVolatility" in puts.columns:
+                    data["iv_values"].extend(puts["impliedVolatility"].dropna().tolist())
+
+                # Top 5 calls/puts by open interest
+                top_calls = []
+                if "openInterest" in calls.columns and not calls.empty:
+                    top_c = calls.nlargest(5, "openInterest")
+                    for _, row in top_c.iterrows():
+                        top_calls.append({
+                            "strike": row.get("strike"),
+                            "oi": int(row.get("openInterest", 0)),
+                            "volume": int(row.get("volume", 0)) if row.get("volume") is not None else 0,
+                            "iv": round(row.get("impliedVolatility", 0) * 100, 1),
+                        })
+                top_puts = []
+                if "openInterest" in puts.columns and not puts.empty:
+                    top_p = puts.nlargest(5, "openInterest")
+                    for _, row in top_p.iterrows():
+                        top_puts.append({
+                            "strike": row.get("strike"),
+                            "oi": int(row.get("openInterest", 0)),
+                            "volume": int(row.get("volume", 0)) if row.get("volume") is not None else 0,
+                            "iv": round(row.get("impliedVolatility", 0) * 100, 1),
+                        })
+
+                data["expiries"].append({
+                    "date": exp_date,
+                    "call_oi": call_oi,
+                    "put_oi": put_oi,
+                    "top_calls": top_calls,
+                    "top_puts": top_puts,
+                })
+
+            # Compute averages
+            if data["iv_values"]:
+                data["avg_iv"] = round(sum(data["iv_values"]) / len(data["iv_values"]) * 100, 1)
+            else:
+                data["avg_iv"] = None
+            del data["iv_values"]
+
+            if data["total_call_oi"] > 0:
+                data["put_call_ratio"] = round(data["total_put_oi"] / data["total_call_oi"], 2)
+            else:
+                data["put_call_ratio"] = None
+
+            return data
+        except Exception:
+            return {}
+
+    def _fetch_macro_news(self, symbol: str, sector: Optional[str]) -> List[Dict[str, str]]:
+        """Fetch macro/sector news from Google News RSS for broader context."""
+        queries = []
+        if sector:
+            queries.append(f"{sector} sector market outlook")
+        queries.append("stock market geopolitical")
+
+        cutoff = datetime.now() - timedelta(days=7)
+        articles: List[Dict[str, str]] = []
+        seen_titles: List[str] = []
+
+        for query in queries:
+            try:
+                encoded = urllib.parse.quote(query)
+                url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+                feed = feedparser.parse(url)
+                for entry in feed.entries[:15]:
+                    try:
+                        pub_dt = datetime(*entry.published_parsed[:6])
+                        if pub_dt < cutoff:
+                            continue
+                        title = entry.get("title", "")
+                        # Dedup by similarity
+                        is_dup = any(
+                            difflib.SequenceMatcher(None, title.lower(), st).ratio() >= 0.85
+                            for st in seen_titles
+                        )
+                        if is_dup:
+                            continue
+                        articles.append({
+                            "date": pub_dt.strftime("%Y-%m-%d"),
+                            "title": title,
+                            "publisher": entry.get("source", {}).get("title", "Google News"),
+                        })
+                        seen_titles.append(title.lower())
+                    except Exception:
+                        continue
+                    if len(articles) >= 10:
+                        break
+            except Exception:
+                continue
+            if len(articles) >= 10:
+                break
+
+        return articles[:10]
+
     def _merge_news_sources(
         self, yf_articles: List[Dict[str, str]], google_articles: List[Dict[str, str]]
     ) -> List[Dict[str, str]]:
@@ -251,6 +384,8 @@ class AIResearcher(QThread):
         price_volume_data: Dict[str, Any],
         analyst_data: Dict[str, Any],
         insider_data: List[Dict[str, Any]],
+        options_data: Optional[Dict[str, Any]] = None,
+        macro_articles: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         news_lines = "\n".join(
             f"- [{a['date']}] {a['title']} ({a['publisher']})"
@@ -261,21 +396,31 @@ class AIResearcher(QThread):
         price_volume = self._format_price_volume_section(price_volume_data)
         analyst = self._format_analyst_section(analyst_data)
         insider = self._format_insider_section(insider_data)
+        options = self._format_options_section(options_data or {})
+        macro = self._format_macro_news_section(macro_articles or [])
 
         return (
             f"/no_think\n\n"
-            f"You are a stock research analyst. Analyze recent news and data about "
-            f"{self._symbol} and provide a concise investment outlook.\n\n"
+            f"You are a stock research analyst advising a trader who uses debit spreads "
+            f"and put spreads. Analyze recent news, data, and the options chain for "
+            f"{self._symbol} and provide a concise investment outlook with actionable strategies.\n\n"
             f"=== RECENT NEWS (last 7 days) ===\n{news_lines}\n\n"
+            f"=== MACRO/SECTOR NEWS ===\n{macro}\n\n"
             f"=== FUNDAMENTALS ===\n{fundamentals}\n\n"
             f"=== PRICE & VOLUME ===\n{price_volume}\n\n"
             f"=== ANALYST RATINGS ===\n{analyst}\n\n"
             f"=== INSIDER TRADING ===\n{insider}\n\n"
+            f"=== OPTIONS CHAIN ===\n{options}\n\n"
             f"Please respond in this EXACT format (one line per field):\n"
             f"SHORT_TERM: <1-2 sentence outlook for the next 1-4 weeks>\n"
             f"LONG_TERM: <1-2 sentence outlook for the next 6-18 months>\n"
             f"CATALYSTS: <comma-separated list of key near-term catalysts>\n"
             f"SENTIMENT: <exactly one of: BULLISH, BEARISH, NEUTRAL>\n"
+            f"DIRECTION: <exactly one of: UP, DOWN, SIDEWAYS>\n"
+            f"TIMEFRAME: <expected timeframe for the move, e.g. \"2-4 weeks\", \"1-3 months\">\n"
+            f"STOCK_STRATEGY: <1-3 sentence actionable stock strategy with entry/exit reasoning>\n"
+            f"OPTIONS_STRATEGY: <1-3 sentence options strategy — suggest specific spread types, "
+            f"approximate strikes/expiries based on the chain data, highlight good risk/reward setups>\n"
             f"SUMMARY: <2-3 sentence overall summary>\n"
         )
 
@@ -395,6 +540,39 @@ class AIResearcher(QThread):
             )
         return "\n".join(f"- {p}" for p in parts)
 
+    def _format_options_section(self, data: Dict[str, Any]) -> str:
+        if not data or not data.get("expiries"):
+            return "- No options data available"
+        parts = []
+        pcr = data.get("put_call_ratio")
+        if pcr is not None:
+            parts.append(f"Put/Call Ratio: {pcr}")
+        avg_iv = data.get("avg_iv")
+        if avg_iv is not None:
+            parts.append(f"Average IV: {avg_iv}%")
+        parts.append(f"Total Call OI: {data.get('total_call_oi', 0):,}  |  Total Put OI: {data.get('total_put_oi', 0):,}")
+
+        for exp in data["expiries"]:
+            parts.append(f"\nExpiry: {exp['date']}  (Call OI: {exp['call_oi']:,}, Put OI: {exp['put_oi']:,})")
+            if exp.get("top_calls"):
+                parts.append("  Top Calls by OI:")
+                for c in exp["top_calls"]:
+                    parts.append(f"    Strike ${c['strike']}  OI:{c['oi']:,}  Vol:{c['volume']:,}  IV:{c['iv']}%")
+            if exp.get("top_puts"):
+                parts.append("  Top Puts by OI:")
+                for p in exp["top_puts"]:
+                    parts.append(f"    Strike ${p['strike']}  OI:{p['oi']:,}  Vol:{p['volume']:,}  IV:{p['iv']}%")
+
+        return "\n".join(f"- {p}" if not p.startswith(" ") and not p.startswith("\n") else p for p in parts)
+
+    def _format_macro_news_section(self, articles: List[Dict[str, str]]) -> str:
+        if not articles:
+            return "- No macro/sector news available"
+        lines = []
+        for a in articles:
+            lines.append(f"- [{a['date']}] {a['title']} ({a['publisher']})")
+        return "\n".join(lines)
+
     # ── LLM callers ───────────────────────────────────────────────────────────
 
     def _call_ollama(self, prompt: str) -> str:
@@ -434,7 +612,7 @@ class AIResearcher(QThread):
             )
         payload = json.dumps({
             "model": model,
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "messages": [{"role": "user", "content": prompt}],
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -464,18 +642,26 @@ class AIResearcher(QThread):
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
         result: Dict[str, str] = {
-            "short_term": "",
-            "long_term":  "",
-            "catalysts":  "",
-            "sentiment":  "NEUTRAL",
-            "summary":    "",
+            "short_term":       "",
+            "long_term":        "",
+            "catalysts":        "",
+            "sentiment":        "NEUTRAL",
+            "direction":        "SIDEWAYS",
+            "timeframe":        "",
+            "stock_strategy":   "",
+            "options_strategy": "",
+            "summary":          "",
         }
         tag_map = {
-            "SHORT_TERM:": "short_term",
-            "LONG_TERM:":  "long_term",
-            "CATALYSTS:":  "catalysts",
-            "SENTIMENT:":  "sentiment",
-            "SUMMARY:":    "summary",
+            "SHORT_TERM:":      "short_term",
+            "LONG_TERM:":       "long_term",
+            "CATALYSTS:":       "catalysts",
+            "SENTIMENT:":       "sentiment",
+            "DIRECTION:":       "direction",
+            "TIMEFRAME:":       "timeframe",
+            "STOCK_STRATEGY:":  "stock_strategy",
+            "OPTIONS_STRATEGY:": "options_strategy",
+            "SUMMARY:":         "summary",
         }
         for line in text.splitlines():
             line = line.strip()
@@ -493,6 +679,15 @@ class AIResearcher(QThread):
             result["sentiment"] = "BEARISH"
         else:
             result["sentiment"] = "NEUTRAL"
+
+        # Normalise direction
+        direction = result["direction"].upper()
+        if "UP" in direction:
+            result["direction"] = "UP"
+        elif "DOWN" in direction:
+            result["direction"] = "DOWN"
+        else:
+            result["direction"] = "SIDEWAYS"
 
         # If parsing failed entirely, store the raw text in summary
         if not any(result[k] for k in ("short_term", "long_term", "summary")):

@@ -163,3 +163,16 @@ SETTINGS — SCANNER TAB
 
 
 ================================================================================
+
+
+--------------------------------------------------------------------------------
+HOW TO LAUNCH
+--------------------------------------------------------------------------------
+
+  "C:\Users\Akshay\AppData\Local\Programs\Python\Python39\python.exe" "C:\Users\Akshay\Documents\SW_projects\stock-monitor\main.py"
+
+  Or, if the py launcher is available:
+
+  py "C:\Users\Akshay\Documents\SW_projects\stock-monitor\main.py"
+
+================================================================================

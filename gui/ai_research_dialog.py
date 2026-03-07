@@ -179,6 +179,37 @@ class AIResearchDialog(QDialog):
                 f"<p>{data['catalysts']}</p>"
             )
 
+        # Direction & Timeframe
+        direction = data.get("direction", "")
+        timeframe = data.get("timeframe", "")
+        if direction or timeframe:
+            dir_colors = {"UP": "#155724", "DOWN": "#721c24", "SIDEWAYS": "#383d41"}
+            dir_bg     = {"UP": "#d4edda", "DOWN": "#f8d7da", "SIDEWAYS": "#e2e3e5"}
+            d_color = dir_colors.get(direction, "#383d41")
+            d_bg    = dir_bg.get(direction, "#e2e3e5")
+            dir_html = (
+                f"<span style='background:{d_bg}; color:{d_color}; "
+                f"padding:2px 8px; border-radius:4px; font-weight:bold;'>"
+                f"{direction}</span>"
+            )
+            tf_html = f"  —  {timeframe}" if timeframe else ""
+            html_parts.append(
+                f"<h3 style='margin-bottom:4px;'>Direction & Timeframe</h3>"
+                f"<p>{dir_html}{tf_html}</p>"
+            )
+
+        if data.get("stock_strategy"):
+            html_parts.append(
+                f"<h3 style='margin-bottom:4px;'>Stock Strategy</h3>"
+                f"<p>{data['stock_strategy']}</p>"
+            )
+
+        if data.get("options_strategy"):
+            html_parts.append(
+                f"<h3 style='margin-bottom:4px;'>Options Strategy</h3>"
+                f"<p>{data['options_strategy']}</p>"
+            )
+
         self._results_browser.setHtml("<br>".join(html_parts))
 
         source  = data.get("source", "")
