@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Running the App
 
 ```bash
-py main.py
+py -3.9 main.py
 ```
 
-Use `py` (not `python`) — this machine uses the Windows Python Launcher.
+Use `py -3.9` (not `python`) — this machine uses the Windows Python Launcher and has multiple Python versions installed. All dependencies (PyQt5, yfinance, etc.) are installed under Python 3.9.
 
 There are no automated tests or lint commands set up for this project.
 

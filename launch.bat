@@ -1,3 +1,3 @@
 @echo off
-py "C:\Users\Akshay\Documents\SW_projects\stock-monitor\main.py"
+py -3.9 "C:\Users\Akshay\Documents\SW_projects\stock-monitor\main.py"
 pause
