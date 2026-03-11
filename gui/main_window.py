@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
+from core.ai_followup import AIFollowUp
 from core.ai_researcher import AIResearcher
 from core.alert_manager import AlertManager
 from core.models import AlertRecord, StockEntry
@@ -63,10 +64,17 @@ class MainWindow(QMainWindow):
         # AI Research threads from Telegram /aiscan — prevent GC
         self._ai_researchers: List[AIResearcher] = []
 
+        # AI follow-up threads — prevent GC
+        self._ai_followups: List[AIFollowUp] = []
+
+        # Last /aiscan research result per chat_id, used for follow-up questions
+        self._aiscan_context: Dict[str, dict] = {}
+
         # Auto AI ranking state (top 10 after deep/complete scans)
         self._ai_rank_researchers: List[AIResearcher] = []
         self._ai_rank_pending: int = 0
-        self._ai_rank_results: Dict[str, float] = {}  # symbol -> rank
+        self._ai_rank_results: Dict[str, Optional[float]] = {}  # symbol -> raw score (None=error)
+        self._ai_rank_top10: List[ScanResult] = []  # held for post-ranking finalization
 
         self._setup_ui()
         self._apply_settings(self._settings)
@@ -190,6 +198,7 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_top.connect(self._on_cmd_top)
         self._cmd_poller.cmd_detail.connect(self._on_cmd_detail)
         self._cmd_poller.cmd_aiscan.connect(self._on_cmd_aiscan)
+        self._cmd_poller.cmd_aifollow.connect(self._on_cmd_aifollow)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -303,14 +312,7 @@ class MainWindow(QMainWindow):
             self._scanner_top10 = {r.symbol for r in results[:10]}
             self._scanner_prev_scores = {r.symbol: r.total_score for r in results}
 
-            # Restore cached AI ranks for top 10
-            from core.ai_research_store import get_cached_entry
-            for r in results[:10]:
-                cached = get_cached_entry(r.symbol)
-                if cached:
-                    rank = self._compute_ai_rank(cached)
-                    self._ai_rank_results[r.symbol] = rank
-                    self._scanner_panel.update_ai_rank(r.symbol, rank)
+            # AI ranks are computed collectively after a scan; not restored from cache
 
     # ── Price Poller slots ────────────────────────────────────────────────────
 
@@ -532,6 +534,7 @@ class MainWindow(QMainWindow):
         if not top10:
             return
 
+        self._ai_rank_top10 = top10
         self._ai_rank_pending = len(top10)
         self._scan_status_label.setText(
             f"AI ranking top {len(top10)} stocks... (0/{len(top10)})"
@@ -551,9 +554,7 @@ class MainWindow(QMainWindow):
             researcher.start()
 
     def _on_auto_rank_complete(self, symbol: str, result: dict) -> None:
-        rank = self._compute_ai_rank(result)
-        self._ai_rank_results[symbol] = rank
-        self._scanner_panel.update_ai_rank(symbol, rank)
+        self._ai_rank_results[symbol] = self._compute_ai_rank(result)
         self._ai_rank_pending -= 1
         total = len(self._ai_rank_researchers)
         done = total - self._ai_rank_pending
@@ -562,19 +563,34 @@ class MainWindow(QMainWindow):
                 f"AI ranking top {total} stocks... ({done}/{total})"
             )
         else:
-            self._scan_status_label.setText(
-                f"AI ranking complete ({total}/{total})"
-            )
+            self._finalize_ai_ranking()
+            self._scan_status_label.setText(f"AI ranking complete ({total}/{total})")
 
     def _on_auto_rank_error(self, symbol: str, error: str) -> None:
-        self._scanner_panel.update_ai_rank(symbol, None)
+        self._ai_rank_results[symbol] = None  # will fall back to total_score ordering
         self._ai_rank_pending -= 1
         total = len(self._ai_rank_researchers)
         done = total - self._ai_rank_pending
         if self._ai_rank_pending <= 0:
-            self._scan_status_label.setText(
-                f"AI ranking complete ({done}/{total})"
-            )
+            self._finalize_ai_ranking()
+            self._scan_status_label.setText(f"AI ranking complete ({done}/{total})")
+
+    def _finalize_ai_ranking(self) -> None:
+        """Assign unique integer ranks 1–N once all AI research is done.
+
+        Primary sort: AI raw score descending (higher = more bullish/confident).
+        Tiebreaker: total_score descending (falls back to scan ranking if AI is unsure).
+        """
+        entries = []
+        for r in self._ai_rank_top10:
+            raw = self._ai_rank_results.get(r.symbol)
+            entries.append((r.symbol, raw if raw is not None else -1.0, r.total_score))
+
+        entries.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+        for final_rank, (symbol, _raw, _total) in enumerate(entries, start=1):
+            self._ai_rank_results[symbol] = float(final_rank)
+            self._scanner_panel.update_ai_rank(symbol, float(final_rank))
 
     # ── Bot Command slots ─────────────────────────────────────────────────────
 
@@ -582,10 +598,18 @@ class MainWindow(QMainWindow):
         self, symbol: str, low: float, high: float, notes: str, reply_chat_id: str
     ) -> None:
         token = self._settings.get("telegram_token", "")
-        if symbol in {e.symbol for e in self._watchlist}:
+        existing = next((e for e in self._watchlist if e.symbol == symbol), None)
+        if existing is not None:
+            existing.low_target = low
+            existing.high_target = high
+            if notes:
+                existing.notes = notes
+            save_watchlist(self._watchlist)
+            self._watchlist_table.refresh(self._watchlist)
             TelegramNotifier.send_message(
                 token, reply_chat_id,
-                f"⚠️ {symbol} is already in your watchlist."
+                f"✏️ Updated <b>{symbol}</b> — Low: ${low}, High: ${high}"
+                + (f"\nNotes: {notes}" if notes else "")
             )
             return
         entry = StockEntry(symbol=symbol, low_target=low, high_target=high, notes=notes)
@@ -702,7 +726,7 @@ class MainWindow(QMainWindow):
 
         researcher = AIResearcher(symbol, scan_result, self._settings, force_refresh=True)
         researcher.research_complete.connect(
-            lambda result, cid=reply_chat_id: self._send_aiscan_telegram(result, cid)
+            lambda result, cid=reply_chat_id: self._on_aiscan_complete(result, cid)
         )
         researcher.research_error.connect(
             lambda err, cid=reply_chat_id: TelegramNotifier.send_message(
@@ -714,6 +738,19 @@ class MainWindow(QMainWindow):
         )
         self._ai_researchers.append(researcher)
         researcher.start()
+
+    def _on_aiscan_complete(self, result: dict, reply_chat_id: str) -> None:
+        """Send the research report and open a follow-up session for the chat."""
+        self._send_aiscan_telegram(result, reply_chat_id)
+        # Store context and register follow-up session
+        self._aiscan_context[reply_chat_id] = result
+        if self._cmd_poller is not None:
+            self._cmd_poller.register_followup_session(reply_chat_id, result.get("symbol", ""))
+        token = self._settings.get("telegram_token", "")
+        TelegramNotifier.send_message(
+            token, reply_chat_id,
+            "💬 <i>You can now ask follow-up questions about this stock for the next 30 minutes.</i>"
+        )
 
     def _send_aiscan_telegram(self, result: dict, reply_chat_id: str) -> None:
         token = self._settings.get("telegram_token", "")
@@ -750,6 +787,37 @@ class MainWindow(QMainWindow):
                 chunk.append(line)
             if chunk:
                 TelegramNotifier.send_message(token, reply_chat_id, "\n".join(chunk))
+
+    def _on_cmd_aifollow(self, symbol: str, question: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        research = self._aiscan_context.get(reply_chat_id)
+        if not research:
+            TelegramNotifier.send_message(
+                token, reply_chat_id,
+                f"⚠️ No active research context for {symbol}. Run /aiscan {symbol} first."
+            )
+            return
+        TelegramNotifier.send_message(
+            token, reply_chat_id,
+            f"🤔 <i>Thinking about your question on {symbol}...</i>"
+        )
+        thread = AIFollowUp(symbol, research, question, self._settings)
+        thread.followup_complete.connect(
+            lambda answer, cid=reply_chat_id: TelegramNotifier.send_message(
+                self._settings.get("telegram_token", ""), cid,
+                f"💬 <b>{symbol} — Follow-up</b>\n\n{answer}"
+            )
+        )
+        thread.followup_error.connect(
+            lambda err, cid=reply_chat_id: TelegramNotifier.send_message(
+                self._settings.get("telegram_token", ""), cid, f"AI error: {err}"
+            )
+        )
+        thread.finished.connect(
+            lambda t=thread: self._ai_followups.remove(t) if t in self._ai_followups else None
+        )
+        self._ai_followups.append(thread)
+        thread.start()
 
     # ── Toolbar / watchlist actions ───────────────────────────────────────────
 

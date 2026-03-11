@@ -8,8 +8,11 @@ Accepted commands:
   /scan
   /top
   /aiscan SYMBOL
+  (plain text) — follow-up question after /aiscan, if a session is active
 """
-from typing import Optional
+import threading
+from datetime import datetime, timedelta
+from typing import Dict, Optional
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -19,6 +22,7 @@ from notifiers.telegram_notifier import TelegramNotifier
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT = 4   # seconds for long-poll getUpdates
 _SLEEP_INTERVAL = 5  # seconds between polls (chunked into 1-s sleeps)
+_FOLLOWUP_TTL_MINUTES = 30  # how long a follow-up session stays active
 
 
 class TelegramCommandPoller(QThread):
@@ -36,6 +40,8 @@ class TelegramCommandPoller(QThread):
     cmd_detail = pyqtSignal(str)
     # symbol, reply_chat_id
     cmd_aiscan = pyqtSignal(str, str)
+    # symbol, question, reply_chat_id
+    cmd_aifollow = pyqtSignal(str, str, str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -45,6 +51,17 @@ class TelegramCommandPoller(QThread):
         self._allowed_chat_id = allowed_chat_id
         self._running = False
         self._offset: Optional[int] = None
+        self._followup_lock = threading.Lock()
+        # chat_id -> {"symbol": str, "expires": datetime}
+        self._followup_sessions: Dict[str, dict] = {}
+
+    def register_followup_session(self, chat_id: str, symbol: str) -> None:
+        """Call from MainWindow after /aiscan completes to open a follow-up window."""
+        with self._followup_lock:
+            self._followup_sessions[chat_id] = {
+                "symbol": symbol,
+                "expires": datetime.now() + timedelta(minutes=_FOLLOWUP_TTL_MINUTES),
+            }
 
     def run(self) -> None:
         self._running = True
@@ -96,6 +113,15 @@ class TelegramCommandPoller(QThread):
 
             text = (message.get("text") or "").strip()
             if not text.startswith("/"):
+                # Check for active follow-up session
+                with self._followup_lock:
+                    session = self._followup_sessions.get(chat_id)
+                    if session and datetime.now() < session["expires"]:
+                        symbol = session["symbol"]
+                    else:
+                        symbol = None
+                if symbol:
+                    self.cmd_aifollow.emit(symbol, text, chat_id)
                 continue
 
             self._dispatch_command(text, chat_id)
@@ -122,7 +148,8 @@ class TelegramCommandPoller(QThread):
             TelegramNotifier.send_message(
                 self._token,
                 reply_chat_id,
-                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan",
+                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan\n"
+                "Tip: after /aiscan you can ask follow-up questions as plain text for 30 minutes.",
             )
 
     def _handle_add(self, parts: list, reply_chat_id: str) -> None:
