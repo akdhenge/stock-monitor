@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_detail.connect(self._on_cmd_detail)
         self._cmd_poller.cmd_aiscan.connect(self._on_cmd_aiscan)
         self._cmd_poller.cmd_aifollow.connect(self._on_cmd_aifollow)
+        self._cmd_poller.cmd_stopaiscan.connect(self._on_cmd_stopaiscan)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -818,6 +819,21 @@ class MainWindow(QMainWindow):
         )
         self._ai_followups.append(thread)
         thread.start()
+
+    def _on_cmd_stopaiscan(self, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        if reply_chat_id in self._aiscan_context:
+            self._cmd_poller.clear_followup_session(reply_chat_id)
+            self._aiscan_context.pop(reply_chat_id, None)
+            TelegramNotifier.send_message(
+                token, reply_chat_id,
+                "✅ Follow-up session ended. Send /aiscan SYMBOL to start a new one."
+            )
+        else:
+            TelegramNotifier.send_message(
+                token, reply_chat_id,
+                "ℹ️ No active follow-up session to stop."
+            )
 
     # ── Toolbar / watchlist actions ───────────────────────────────────────────
 

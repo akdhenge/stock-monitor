@@ -8,6 +8,7 @@ Accepted commands:
   /scan
   /top
   /aiscan SYMBOL
+  /stopaiscan — end the active follow-up session early
   (plain text) — follow-up question after /aiscan, if a session is active
 """
 import threading
@@ -42,6 +43,8 @@ class TelegramCommandPoller(QThread):
     cmd_aiscan = pyqtSignal(str, str)
     # symbol, question, reply_chat_id
     cmd_aifollow = pyqtSignal(str, str, str)
+    # reply_chat_id
+    cmd_stopaiscan = pyqtSignal(str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -62,6 +65,11 @@ class TelegramCommandPoller(QThread):
                 "symbol": symbol,
                 "expires": datetime.now() + timedelta(minutes=_FOLLOWUP_TTL_MINUTES),
             }
+
+    def clear_followup_session(self, chat_id: str) -> None:
+        """End the follow-up session for a chat immediately."""
+        with self._followup_lock:
+            self._followup_sessions.pop(chat_id, None)
 
     def run(self) -> None:
         self._running = True
@@ -144,11 +152,13 @@ class TelegramCommandPoller(QThread):
             self.cmd_detail.emit(reply_chat_id)
         elif cmd == "/aiscan":
             self._handle_aiscan(parts, reply_chat_id)
+        elif cmd == "/stopaiscan":
+            self.cmd_stopaiscan.emit(reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
                 reply_chat_id,
-                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan\n"
+                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan /stopaiscan\n"
                 "Tip: after /aiscan you can ask follow-up questions as plain text for 30 minutes.",
             )
 

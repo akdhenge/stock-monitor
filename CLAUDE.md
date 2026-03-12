@@ -43,6 +43,22 @@ Universe is fetched from Wikipedia index pages (S&P 500/400/600, NASDAQ-100) wit
 
 `TelegramCommandPoller` emits signals (e.g. `cmd_scan`, `cmd_aiscan`) → `MainWindow` slots handle business logic → `TelegramNotifier.send_message()` replies. The poller is only started when `telegram_command_polling_enabled` is true in settings.
 
+**Available bot commands:**
+
+| Command | Description |
+|---|---|
+| `/add SYMBOL LOW HIGH [notes]` | Add stock to watchlist |
+| `/remove SYMBOL` | Remove stock from watchlist |
+| `/list` | List watchlist |
+| `/scan` | Trigger a quick scan |
+| `/top` | Show top scan results |
+| `/detail` | Show detailed scan table |
+| `/aiscan SYMBOL` | Run AI research on a symbol; opens a 30-minute follow-up Q&A window |
+| `/stopaiscan` | End the active `/aiscan` follow-up session immediately (frees memory) |
+| (plain text) | Follow-up question for the active `/aiscan` session |
+
+**`/aiscan` follow-up session lifecycle:** After `/aiscan` completes, `MainWindow._on_aiscan_complete` calls `TelegramCommandPoller.register_followup_session()` which stores `{symbol, expires}` per `chat_id`. Plain-text messages are routed to `cmd_aifollow` → `AIFollowUp` QThread. `/stopaiscan` emits `cmd_stopaiscan` → `_on_cmd_stopaiscan` which clears both `_aiscan_context[chat_id]` and the poller session, freeing memory immediately.
+
 ### AI Research (`core/ai_researcher.py`)
 
 Supports two backends controlled by `ai_provider` setting:
