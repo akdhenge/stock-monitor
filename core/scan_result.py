@@ -24,4 +24,5 @@ class ScanResult:
     near_200d_ma: Optional[bool]
     volume_spike: Optional[bool]
     scan_mode: str = "quick"
+    score_congressional: float = 0.0   # 0–100, tracked-politician buy/sell signal
     timestamp: datetime = field(default_factory=datetime.now)

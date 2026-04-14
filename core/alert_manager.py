@@ -10,6 +10,25 @@ class AlertManager:
         self.cooldown_minutes = cooldown_minutes
         self._notifiers: List[BaseNotifier] = []
         self._on_alert: Optional[Callable[[AlertRecord], None]] = None
+        # symbol -> date string ("YYYY-MM-DD"); alerts suppressed until next day
+        self._muted: Dict[str, str] = {}
+
+    def mute_symbol(self, symbol: str) -> None:
+        """Suppress all alerts for this symbol for the rest of today."""
+        self._muted[symbol.upper()] = datetime.now().strftime("%Y-%m-%d")
+
+    def unmute_symbol(self, symbol: str) -> None:
+        self._muted.pop(symbol.upper(), None)
+
+    def is_muted(self, symbol: str) -> bool:
+        today = datetime.now().strftime("%Y-%m-%d")
+        muted_date = self._muted.get(symbol.upper())
+        if muted_date and muted_date == today:
+            return True
+        # Clear stale entry if it's a different day
+        if muted_date and muted_date != today:
+            self._muted.pop(symbol.upper(), None)
+        return False
 
     def set_notifiers(self, notifiers: List[BaseNotifier]) -> None:
         self._notifiers = notifiers
@@ -24,6 +43,8 @@ class AlertManager:
 
     def check_and_alert(self, entry: StockEntry) -> Optional[AlertRecord]:
         if entry.current_price is None:
+            return None
+        if self.is_muted(entry.symbol):
             return None
 
         price = entry.current_price

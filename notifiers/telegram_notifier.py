@@ -20,11 +20,15 @@ class TelegramNotifier(BaseNotifier):
     def send(self, record: AlertRecord) -> bool:
         direction_emoji = "🔴" if record.direction == "ABOVE HIGH" else "🟢"
         action = "SELL signal" if record.direction == "ABOVE HIGH" else "BUY opportunity"
+        target_side = "high" if record.direction == "ABOVE HIGH" else "low"
         text = (
             f"{direction_emoji} <b>{record.symbol}</b> — {action}\n"
             f"Price: <b>${record.price:.2f}</b>\n"
             f"Target: ${record.target:.2f} ({record.direction})\n"
-            f"Time: {record.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            f"Time: {record.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"<i>Reply options:</i>\n"
+            f"• <code>/revise {record.symbol} {target_side} NEW_PRICE</code> — update target\n"
+            f"• <code>/mute {record.symbol}</code> — silence for today"
         )
         try:
             resp = requests.post(

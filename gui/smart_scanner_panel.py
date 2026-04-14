@@ -44,6 +44,25 @@ _ORANGE_BG      = QColor("#ffe0b2")  # 35–49  weak
 _DARK_ORANGE_BG = QColor("#ffb74d")  # 20–34  weaker
 _RED_BG         = QColor("#ffcdd2")  # < 20   weakest
 
+_LEGEND = [
+    (_GREEN_BG,       "≥ 65  Strong"),
+    (_YELLOW_BG,      "50–64  Good"),
+    (_ORANGE_BG,      "35–49  Moderate"),
+    (_DARK_ORANGE_BG, "20–34  Weak"),
+    (_RED_BG,         "< 20  Poor"),
+]
+
+
+class _NumericItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts numerically via Qt.UserRole instead of display text."""
+    def __lt__(self, other: "QTableWidgetItem") -> bool:
+        self_val  = self.data(Qt.UserRole)
+        other_val = other.data(Qt.UserRole)
+        try:
+            return float(self_val) < float(other_val)
+        except (TypeError, ValueError):
+            return super().__lt__(other)
+
 
 class SmartScannerPanel(QWidget):
     # Emitted when user clicks "Add Selected to Watchlist"; carries list of ScanResult
@@ -130,6 +149,23 @@ class SmartScannerPanel(QWidget):
 
         layout.addWidget(self._table, stretch=1)
 
+        # --- Color legend row ---
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(6)
+        legend_label = QLabel("Score:")
+        legend_label.setStyleSheet("font-size: 11px; color: #555;")
+        legend_row.addWidget(legend_label)
+        for color, text in _LEGEND:
+            chip = QLabel(f"  {text}  ")
+            chip.setStyleSheet(
+                f"background-color: {color.name()}; "
+                "border: 1px solid #bbb; border-radius: 3px; "
+                "font-size: 11px; padding: 1px 4px;"
+            )
+            legend_row.addWidget(chip)
+        legend_row.addStretch()
+        layout.addLayout(legend_row)
+
         # --- Bottom action row ---
         bottom_row = QHBoxLayout()
 
@@ -197,11 +233,11 @@ class SmartScannerPanel(QWidget):
             sym_item = self._table.item(row, _COL_IDX["Symbol"])
             if sym_item and sym_item.text() == symbol:
                 if score is None:
-                    item = QTableWidgetItem("ERR")
-                    item.setData(Qt.UserRole, 999.0)  # sort last
+                    item = _NumericItem("ERR")
+                    item.setData(Qt.UserRole, 9998.0)  # sort last (but before unranked --)
                 else:
-                    item = QTableWidgetItem(str(int(score)))
-                    item.setData(Qt.UserRole, float(score))  # sort ascending = rank 1 first
+                    item = _NumericItem(str(int(score)))
+                    item.setData(Qt.UserRole, float(score))
                 item.setTextAlignment(Qt.AlignCenter)
                 # Preserve existing row background color
                 existing = self._table.item(row, 0)
@@ -220,32 +256,36 @@ class SmartScannerPanel(QWidget):
             row = self._table.rowCount()
             self._table.insertRow(row)
 
-            def _num_item(val, fmt="{:.1f}") -> QTableWidgetItem:
+            def _num_item(val, fmt="{:.1f}") -> _NumericItem:
                 if val is None:
-                    item = QTableWidgetItem("—")
+                    item = _NumericItem("—")
                     item.setData(Qt.UserRole, -1.0)
                 else:
-                    item = QTableWidgetItem(fmt.format(val))
+                    item = _NumericItem(fmt.format(val))
                     item.setData(Qt.UserRole, float(val))
                 item.setTextAlignment(Qt.AlignCenter)
                 return item
 
-            def _pct_item(val) -> QTableWidgetItem:
+            def _pct_item(val) -> _NumericItem:
                 if val is None:
-                    item = QTableWidgetItem("—")
+                    item = _NumericItem("—")
                     item.setData(Qt.UserRole, -999.0)
                 else:
-                    item = QTableWidgetItem(f"{val * 100:.1f}%")
+                    item = _NumericItem(f"{val * 100:.1f}%")
                     item.setData(Qt.UserRole, float(val))
                 item.setTextAlignment(Qt.AlignCenter)
                 return item
 
-            ai_rank_item = QTableWidgetItem("--")
-            ai_rank_item.setData(Qt.UserRole, 0.0)
+            ai_rank_item = _NumericItem("--")
+            ai_rank_item.setData(Qt.UserRole, 9999.0)  # sort unranked last
             ai_rank_item.setTextAlignment(Qt.AlignCenter)
 
+            rank_item = _NumericItem(str(rank))
+            rank_item.setData(Qt.UserRole, float(rank))
+            rank_item.setTextAlignment(Qt.AlignCenter)
+
             items = [
-                QTableWidgetItem(str(rank)),
+                rank_item,
                 QTableWidgetItem(r.symbol),
                 _num_item(r.total_score),
                 _num_item(r.score_value),
@@ -259,7 +299,6 @@ class SmartScannerPanel(QWidget):
                 _num_item(r.rsi, fmt="{:.0f}"),
                 ai_rank_item,
             ]
-            items[0].setTextAlignment(Qt.AlignCenter)
             items[1].setTextAlignment(Qt.AlignCenter)
 
             for col, item in enumerate(items):

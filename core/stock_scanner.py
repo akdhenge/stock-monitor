@@ -9,8 +9,10 @@ Modes:
                run 1-3x/day; alerts on new top-5 + score >= threshold +
                sends daily simplified summary via Telegram.
 """
+import json
+import os
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yfinance as yf
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -71,10 +73,17 @@ class StockScanner(QThread):
     scan_status   = pyqtSignal(str)
     scan_error    = pyqtSignal(str)
 
-    def __init__(self, mode: str = "quick", universe_size: int = 500, parent=None):
+    def __init__(
+        self,
+        mode: str = "quick",
+        universe_size: int = 500,
+        settings: Optional[Dict[str, Any]] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._mode = mode
         self._universe_size = universe_size
+        self._settings: Dict[str, Any] = settings or {}
         self._running = False
         self._previous_top5:  Set[str] = set()
         self._previous_top10: Set[str] = set()
@@ -303,6 +312,16 @@ class StockScanner(QThread):
             return None
 
         self.scan_status.emit(f"{scan_mode.capitalize()} scan: analyzing {total} symbols…")
+
+        # Pre-load congressional data once for the entire scan
+        tracked_politicians = [
+            p.strip()
+            for p in self._settings.get("congressional_tracked_politicians", "").split(",")
+            if p.strip()
+        ]
+        self.scan_status.emit("Loading congressional trade data…")
+        congressional_lookup = self._preload_congressional_data(tracked_politicians)
+
         results: List[ScanResult] = []
         sector_pe_data: Dict[str, List[float]] = {}
 
@@ -313,6 +332,9 @@ class StockScanner(QThread):
             try:
                 r = self._analyze_symbol(sym, scan_mode)
                 if r is not None:
+                    r.score_congressional = self._score_congressional(
+                        congressional_lookup.get(sym.upper(), [])
+                    )
                     results.append(r)
                     if r.sector and r.pe_ratio is not None:
                         sector_pe_data.setdefault(r.sector, []).append(r.pe_ratio)
@@ -331,11 +353,14 @@ class StockScanner(QThread):
         self.scan_status.emit("Scoring…")
         for r in results:
             med_pe = sector_median_pe.get(r.sector or "", None)
-            r.score_value    = self._score_value(r, med_pe)
-            r.score_growth   = self._score_growth(r)
+            r.score_value     = self._score_value(r, med_pe)
+            r.score_growth    = self._score_growth(r)
             r.score_technical = self._score_technical(r)
+            # Congressional bonus: up to +15 pts on top of base score
+            cong_bonus = (r.score_congressional / 100.0) * 15.0
             r.total_score = round(
-                r.score_value * 0.4 + r.score_growth * 0.3 + r.score_technical * 0.3, 2
+                r.score_value * 0.4 + r.score_growth * 0.3 + r.score_technical * 0.3
+                + cong_bonus, 2
             )
 
         return results
@@ -427,6 +452,98 @@ class StockScanner(QThread):
             return None
 
     # ── Scoring ───────────────────────────────────────────────────────────────
+
+    def _preload_congressional_data(
+        self, tracked: List[str], days: int = 90
+    ) -> Dict[str, List[dict]]:
+        """Download House + Senate trade JSONs once; return {TICKER: [trades]} lookup."""
+        import urllib.request as _req
+        data_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data"))
+        sources = [
+            (
+                os.path.join(data_dir, "house_trades_cache.json"),
+                "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
+                "representative",
+                "district",
+            ),
+            (
+                os.path.join(data_dir, "senate_trades_cache.json"),
+                "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
+                "senator",
+                "state",
+            ),
+        ]
+
+        cutoff = time.time() - days * 86400
+        lookup: Dict[str, List[dict]] = {}
+
+        for cache_path, url, name_field, loc_field in sources:
+            all_trades = None
+            try:
+                if os.path.exists(cache_path) and time.time() - os.path.getmtime(cache_path) < 86400:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        all_trades = json.load(f)
+            except Exception:
+                pass
+            if all_trades is None:
+                try:
+                    req = _req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with _req.urlopen(req, timeout=30) as resp:
+                        all_trades = json.loads(resp.read().decode("utf-8"))
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        json.dump(all_trades, f)
+                except Exception:
+                    continue
+
+            for trade in all_trades:
+                ticker = str(trade.get("ticker", "")).strip().upper().replace(".", "-")
+                if not ticker or ticker == "--":
+                    continue
+                # Date filter
+                tx_str = str(trade.get("transaction_date", ""))[:10]
+                try:
+                    import datetime as _dt
+                    tx_ts = _dt.datetime.strptime(tx_str, "%Y-%m-%d").timestamp()
+                    if tx_ts < cutoff:
+                        continue
+                except Exception:
+                    pass
+                # Politician filter
+                raw_name = trade.get(name_field, "")
+                if isinstance(raw_name, dict):
+                    name = f"{raw_name.get('first_name','')} {raw_name.get('last_name','')}".strip()
+                else:
+                    name = str(raw_name)
+                if tracked and not self._congressional_name_matches(name, tracked):
+                    continue
+                lookup.setdefault(ticker, []).append({
+                    "date":           tx_str,
+                    "representative": name,
+                    "type":           trade.get("type", ""),
+                    "amount":         trade.get("amount", ""),
+                })
+
+        return lookup
+
+    @staticmethod
+    def _congressional_name_matches(name: str, tracked: List[str]) -> bool:
+        name_lower = name.lower()
+        for politician in tracked:
+            pol_lower = politician.lower()
+            if pol_lower in name_lower:
+                return True
+            words = pol_lower.split()
+            if len(words) >= 2 and all(w in name_lower for w in words):
+                return True
+        return False
+
+    def _score_congressional(self, trades: List[dict]) -> float:
+        """Score 0–100: tracked-politician buys raise score, sells lower it."""
+        buys  = sum(1 for t in trades if "purchase" in t.get("type", "").lower())
+        sells = sum(1 for t in trades if "sale" in t.get("type", "").lower())
+        pts = min(buys * 50, 100)
+        pts = max(pts - sells * 20, 0)
+        return float(pts)
 
     def _compute_sector_median_pe(
         self, sector_pe_data: Dict[str, List[float]]

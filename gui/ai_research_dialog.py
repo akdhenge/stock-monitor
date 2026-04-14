@@ -198,6 +198,27 @@ class AIResearchDialog(QDialog):
                 f"<p>{dir_html}{tf_html}</p>"
             )
 
+        cong_signal = data.get("congressional_signal", "NONE").upper()
+        if cong_signal and cong_signal != "NONE":
+            cong_colors = {"BULLISH": "#155724", "BEARISH": "#721c24", "NEUTRAL": "#383d41"}
+            cong_bg     = {"BULLISH": "#d4edda",  "BEARISH": "#f8d7da",  "NEUTRAL": "#e2e3e5"}
+            # Extract just the first word (BULLISH/BEARISH/NEUTRAL) if explanation follows
+            cong_word = cong_signal.split()[0] if cong_signal.split() else cong_signal
+            c_color = cong_colors.get(cong_word, "#383d41")
+            c_bg    = cong_bg.get(cong_word, "#fff3cd")
+            badge = (
+                f"<span style='background:{c_bg}; color:{c_color}; "
+                f"padding:2px 8px; border-radius:4px; font-weight:bold;'>"
+                f"{cong_word}</span>"
+            )
+            # Show rest of the text after the signal word
+            rest = cong_signal[len(cong_word):].strip(" —-:")
+            cong_text = f"{badge}  {rest}" if rest else badge
+            html_parts.append(
+                f"<h3 style='margin-bottom:4px;'>Congressional Signal</h3>"
+                f"<p>{cong_text}</p>"
+            )
+
         if data.get("stock_strategy"):
             html_parts.append(
                 f"<h3 style='margin-bottom:4px;'>Stock Strategy</h3>"

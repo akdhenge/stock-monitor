@@ -2,7 +2,7 @@ from typing import Any, Dict
 
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QSpinBox, QTabWidget, QTimeEdit, QVBoxLayout, QWidget,
 )
 from PyQt5.QtCore import QTime
@@ -259,6 +259,7 @@ class SettingsDialog(QDialog):
         self._ai_provider_combo = QComboBox()
         self._ai_provider_combo.addItem("Ollama (local, free)", "ollama")
         self._ai_provider_combo.addItem("Claude API (Anthropic)", "claude")
+        self._ai_provider_combo.addItem("OpenRouter API", "openrouter")
         current_provider = self._settings.get("ai_provider", "ollama")
         idx = self._ai_provider_combo.findData(current_provider)
         if idx >= 0:
@@ -302,6 +303,44 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(claude_box)
 
+        # OpenRouter group
+        or_box = QGroupBox("OpenRouter API")
+        or_form = QFormLayout(or_box)
+
+        self._openrouter_api_key = QLineEdit(
+            self._settings.get("ai_openrouter_api_key", "")
+        )
+        self._openrouter_api_key.setEchoMode(QLineEdit.Password)
+        self._openrouter_api_key.setPlaceholderText("sk-or-…")
+        or_form.addRow("API Key:", self._openrouter_api_key)
+
+        self._openrouter_model = QLineEdit(
+            self._settings.get("ai_openrouter_model", "qwen/qwen3-coder:free")
+        )
+        self._openrouter_model.setPlaceholderText("e.g. qwen/qwen3-coder:free")
+        or_form.addRow("Model:", self._openrouter_model)
+
+        layout.addWidget(or_box)
+
+        # Congressional trading signal
+        cong_box = QGroupBox("Congressional Trading Signal")
+        cong_form = QFormLayout(cong_box)
+
+        self._congressional_politicians_edit = QPlainTextEdit()
+        self._congressional_politicians_edit.setPlaceholderText(
+            "One name per line. Leave empty to track ALL politicians.\n"
+            "e.g.\nNancy Pelosi\nTommy Tuberville"
+        )
+        raw_politicians = self._settings.get("congressional_tracked_politicians", "")
+        self._congressional_politicians_edit.setPlainText(
+            "\n".join(p.strip() for p in raw_politicians.split(",") if p.strip())
+        )
+        self._congressional_politicians_edit.setFixedHeight(120)
+        cong_form.addRow("Tracked Politicians\n(one per line):",
+                         self._congressional_politicians_edit)
+
+        layout.addWidget(cong_box)
+
         layout.addStretch()
 
         note = QLabel(
@@ -309,7 +348,9 @@ class SettingsDialog(QDialog):
             "  ollama pull mistral     (one-time ~4 GB download)\n"
             "Ollama runs fully on your local machine — no API key needed.\n\n"
             "Claude API: get a key at https://console.anthropic.com\n"
-            "Note: this uses the Anthropic API (paid), not a Claude Pro subscription."
+            "Note: this uses the Anthropic API (paid), not a Claude Pro subscription.\n\n"
+            "OpenRouter: get a free key at https://openrouter.ai — routes to many models\n"
+            "including free tiers (e.g. qwen/qwen3-coder:free)."
         )
         note.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(note)
@@ -356,8 +397,15 @@ class SettingsDialog(QDialog):
             "ai_provider":       self._ai_provider_combo.currentData(),
             "ai_ollama_url":     self._ollama_url.text().strip(),
             "ai_ollama_model":   self._ollama_model.text().strip(),
-            "ai_claude_api_key": self._claude_api_key.text().strip(),
-            "ai_claude_model":   self._claude_model.text().strip(),
+            "ai_claude_api_key":     self._claude_api_key.text().strip(),
+            "ai_claude_model":       self._claude_model.text().strip(),
+            "ai_openrouter_api_key": self._openrouter_api_key.text().strip(),
+            "ai_openrouter_model":   self._openrouter_model.text().strip(),
+            "congressional_tracked_politicians": ",".join(
+                line.strip()
+                for line in self._congressional_politicians_edit.toPlainText().splitlines()
+                if line.strip()
+            ),
         })
         save_settings(self._settings)
         self.accept()

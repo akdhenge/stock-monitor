@@ -9,6 +9,7 @@ Signals:
 """
 import difflib
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -105,13 +106,16 @@ class AIResearcher(QThread):
         analyst_data = self._fetch_analyst_ratings(ticker)
         insider_data = self._fetch_insider_transactions(ticker)
         options_data = self._fetch_options_data(ticker)
+        short_interest_data = self._fetch_short_interest(ticker)
+        earnings_history = self._fetch_earnings_history(ticker)
 
         if not self._running:
             return
 
-        # 4b. Fetch macro/sector news
+        # 4b. Fetch macro/sector news and congressional trades
         sector = self._scan_result.sector if self._scan_result else None
         macro_articles = self._fetch_macro_news(self._symbol, sector)
+        congressional_data = self._fetch_congressional_trades(self._symbol)
 
         if not self._running:
             return
@@ -119,7 +123,8 @@ class AIResearcher(QThread):
         # 5. Build prompt
         prompt = self._build_prompt(
             articles, price_volume_data, analyst_data, insider_data,
-            options_data, macro_articles,
+            options_data, macro_articles, short_interest_data,
+            earnings_history, congressional_data,
         )
 
         # 6. Call LLM
@@ -127,6 +132,8 @@ class AIResearcher(QThread):
         try:
             if provider == "claude":
                 raw_response = self._call_claude(prompt)
+            elif provider == "openrouter":
+                raw_response = self._call_openrouter(prompt)
             else:
                 raw_response = self._call_ollama(prompt)
         except Exception as exc:
@@ -310,6 +317,181 @@ class AIResearcher(QThread):
         except Exception:
             return {}
 
+    def _fetch_short_interest(self, ticker) -> Dict[str, Any]:
+        """Fetch short interest metrics from ticker.info."""
+        try:
+            info = ticker.info or {}
+            data: Dict[str, Any] = {}
+            short_ratio = info.get("shortRatio")
+            short_float = info.get("shortPercentOfFloat")
+            shares_short = info.get("sharesShort")
+            if short_ratio is not None:
+                data["days_to_cover"] = round(float(short_ratio), 1)
+            if short_float is not None:
+                data["short_float_pct"] = round(float(short_float) * 100, 1)
+            if shares_short is not None:
+                data["shares_short"] = int(shares_short)
+            return data
+        except Exception:
+            return {}
+
+    def _fetch_earnings_history(self, ticker) -> List[Dict[str, Any]]:
+        """Fetch last 4 quarters of earnings surprises."""
+        try:
+            df = ticker.earnings_dates
+            if df is None or df.empty:
+                return []
+            records: List[Dict[str, Any]] = []
+            for dt, row in df.head(8).iterrows():
+                eps_est = row.get("EPS Estimate")
+                eps_act = row.get("Reported EPS")
+                surprise_pct = row.get("Surprise(%)")
+                # Skip future estimates (no actuals yet)
+                if eps_act is None or (isinstance(eps_act, float) and eps_act != eps_act):
+                    continue
+                record: Dict[str, Any] = {"date": str(dt)[:10]}
+                if eps_est is not None and not (isinstance(eps_est, float) and eps_est != eps_est):
+                    record["eps_estimate"] = round(float(eps_est), 2)
+                record["eps_actual"] = round(float(eps_act), 2)
+                if surprise_pct is not None and not (isinstance(surprise_pct, float) and surprise_pct != surprise_pct):
+                    record["surprise_pct"] = round(float(surprise_pct), 1)
+                    record["beat"] = float(surprise_pct) > 0
+                records.append(record)
+                if len(records) >= 4:
+                    break
+            return records
+        except Exception:
+            return []
+
+    def _fetch_congressional_trades(self, symbol: str, days: int = 180) -> List[Dict[str, Any]]:
+        """Fetch House + Senate congressional trades filtered to tracked politicians."""
+        tracked = [p.strip() for p in
+                   self._settings.get("congressional_tracked_politicians", "").split(",")
+                   if p.strip()]
+        house  = self._fetch_house_trades(symbol, tracked, days)
+        senate = self._fetch_senate_trades(symbol, tracked, days)
+        merged = house + senate
+        merged.sort(key=lambda x: x.get("date", ""), reverse=True)
+        return merged[:20]
+
+    @staticmethod
+    def _politician_matches(name: str, tracked: List[str]) -> bool:
+        """Return True if `name` matches any entry in the tracked list."""
+        name_lower = name.lower()
+        for politician in tracked:
+            pol_lower = politician.lower()
+            if pol_lower in name_lower:
+                return True
+            # Handle reversed format "LastName, FirstName" vs "FirstName LastName"
+            words = pol_lower.split()
+            if len(words) >= 2 and all(w in name_lower for w in words):
+                return True
+        return False
+
+    def _load_json_cache(self, cache_path: str, url: str) -> Optional[list]:
+        """Load a JSON list from a 24h local cache, downloading from url if stale."""
+        import urllib.request as _req
+        try:
+            if os.path.exists(cache_path):
+                if time.time() - os.path.getmtime(cache_path) < 86400:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+        except Exception:
+            pass
+        try:
+            req = _req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _req.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            return data
+        except Exception:
+            return None
+
+    def _fetch_house_trades(
+        self, symbol: str, tracked: List[str], days: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch House trades from House Stock Watcher S3."""
+        cache_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "data", "house_trades_cache.json")
+        )
+        url = ("https://house-stock-watcher-data.s3-us-west-2.amazonaws.com"
+               "/data/all_transactions.json")
+        all_trades = self._load_json_cache(cache_path, url)
+        if not all_trades:
+            return []
+
+        cutoff   = datetime.now() - timedelta(days=days)
+        sym_upper = symbol.upper()
+        matches: List[Dict[str, Any]] = []
+        for trade in all_trades:
+            ticker = str(trade.get("ticker", "")).strip().upper().replace(".", "-")
+            if ticker != sym_upper or ticker in ("", "--"):
+                continue
+            rep = trade.get("representative", "")
+            if tracked and not self._politician_matches(rep, tracked):
+                continue
+            tx_date_str = str(trade.get("transaction_date", ""))[:10]
+            try:
+                if datetime.strptime(tx_date_str, "%Y-%m-%d") < cutoff:
+                    continue
+            except Exception:
+                pass
+            matches.append({
+                "date":           tx_date_str,
+                "representative": rep,
+                "type":           trade.get("type", ""),
+                "amount":         trade.get("amount", ""),
+                "district":       trade.get("district", ""),
+                "chamber":        "House",
+            })
+        return matches
+
+    def _fetch_senate_trades(
+        self, symbol: str, tracked: List[str], days: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch Senate trades from Senate Stock Watcher S3."""
+        cache_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "data", "senate_trades_cache.json")
+        )
+        url = ("https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com"
+               "/aggregate/all_transactions.json")
+        all_trades = self._load_json_cache(cache_path, url)
+        if not all_trades:
+            return []
+
+        cutoff    = datetime.now() - timedelta(days=days)
+        sym_upper = symbol.upper()
+        matches: List[Dict[str, Any]] = []
+        for trade in all_trades:
+            ticker = str(trade.get("ticker", "")).strip().upper().replace(".", "-")
+            if ticker != sym_upper or ticker in ("", "--"):
+                continue
+            # Senator name may be "LastName, FirstName" or a dict with first/last
+            senator_raw = trade.get("senator", "")
+            if isinstance(senator_raw, dict):
+                senator = (f"{senator_raw.get('first_name', '')} "
+                           f"{senator_raw.get('last_name', '')}").strip()
+            else:
+                senator = str(senator_raw)
+            if tracked and not self._politician_matches(senator, tracked):
+                continue
+            tx_date_str = str(trade.get("transaction_date", ""))[:10]
+            try:
+                if datetime.strptime(tx_date_str, "%Y-%m-%d") < cutoff:
+                    continue
+            except Exception:
+                pass
+            matches.append({
+                "date":           tx_date_str,
+                "representative": senator,
+                "type":           trade.get("type", ""),
+                "amount":         trade.get("amount", ""),
+                "district":       trade.get("state", ""),
+                "chamber":        "Senate",
+            })
+        return matches
+
     def _fetch_macro_news(self, symbol: str, sector: Optional[str]) -> List[Dict[str, str]]:
         """Fetch macro/sector news from Google News RSS for broader context."""
         queries = []
@@ -386,6 +568,9 @@ class AIResearcher(QThread):
         insider_data: List[Dict[str, Any]],
         options_data: Optional[Dict[str, Any]] = None,
         macro_articles: Optional[List[Dict[str, str]]] = None,
+        short_interest_data: Optional[Dict[str, Any]] = None,
+        earnings_history: Optional[List[Dict[str, Any]]] = None,
+        congressional_data: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         news_lines = "\n".join(
             f"- [{a['date']}] {a['title']} ({a['publisher']})"
@@ -398,6 +583,9 @@ class AIResearcher(QThread):
         insider = self._format_insider_section(insider_data)
         options = self._format_options_section(options_data or {})
         macro = self._format_macro_news_section(macro_articles or [])
+        short_interest = self._format_short_interest_section(short_interest_data or {})
+        earnings = self._format_earnings_history_section(earnings_history or [])
+        congressional = self._format_congressional_section(congressional_data or [])
 
         return (
             f"/no_think\n\n"
@@ -408,8 +596,11 @@ class AIResearcher(QThread):
             f"=== MACRO/SECTOR NEWS ===\n{macro}\n\n"
             f"=== FUNDAMENTALS ===\n{fundamentals}\n\n"
             f"=== PRICE & VOLUME ===\n{price_volume}\n\n"
+            f"=== SHORT INTEREST ===\n{short_interest}\n\n"
+            f"=== EARNINGS HISTORY (last 4 quarters) ===\n{earnings}\n\n"
             f"=== ANALYST RATINGS ===\n{analyst}\n\n"
             f"=== INSIDER TRADING ===\n{insider}\n\n"
+            f"=== CONGRESSIONAL TRADES (STOCK Act disclosures) ===\n{congressional}\n\n"
             f"=== OPTIONS CHAIN ===\n{options}\n\n"
             f"Please respond in this EXACT format (one line per field):\n"
             f"SHORT_TERM: <1-2 sentence outlook for the next 1-4 weeks>\n"
@@ -418,6 +609,7 @@ class AIResearcher(QThread):
             f"SENTIMENT: <exactly one of: BULLISH, BEARISH, NEUTRAL>\n"
             f"DIRECTION: <exactly one of: UP, DOWN, SIDEWAYS>\n"
             f"TIMEFRAME: <expected timeframe for the move, e.g. \"2-4 weeks\", \"1-3 months\">\n"
+            f"CONGRESSIONAL_SIGNAL: <BULLISH, BEARISH, NEUTRAL, or NONE — 1 sentence on what congressional buying/selling implies>\n"
             f"STOCK_STRATEGY: <1-3 sentence actionable stock strategy with entry/exit reasoning>\n"
             f"OPTIONS_STRATEGY: <1-3 sentence options strategy — suggest specific spread types, "
             f"approximate strikes/expiries based on the chain data, highlight good risk/reward setups>\n"
@@ -565,6 +757,60 @@ class AIResearcher(QThread):
 
         return "\n".join(f"- {p}" if not p.startswith(" ") and not p.startswith("\n") else p for p in parts)
 
+    def _format_short_interest_section(self, data: Dict[str, Any]) -> str:
+        if not data:
+            return "- No data available"
+        parts = []
+        dtc = data.get("days_to_cover")
+        if dtc is not None:
+            parts.append(f"Days to Cover: {dtc}")
+        sf = data.get("short_float_pct")
+        if sf is not None:
+            parts.append(f"Short % of Float: {sf}%")
+        ss = data.get("shares_short")
+        if ss is not None:
+            if ss >= 1_000_000:
+                parts.append(f"Shares Short: {ss / 1_000_000:.1f}M")
+            else:
+                parts.append(f"Shares Short: {ss:,}")
+        return "\n".join(f"- {p}" for p in parts) if parts else "- No data available"
+
+    def _format_earnings_history_section(self, records: List[Dict[str, Any]]) -> str:
+        if not records:
+            return "- No earnings history available"
+        parts = []
+        for r in records:
+            est = r.get("eps_estimate")
+            act = r.get("eps_actual")
+            surprise = r.get("surprise_pct")
+            beat = r.get("beat")
+            line = f"[{r['date']}] Actual EPS: {act}"
+            if est is not None:
+                line += f"  Est: {est}"
+            if surprise is not None:
+                icon = "BEAT" if beat else "MISS"
+                line += f"  Surprise: {surprise:+.1f}% ({icon})"
+            parts.append(line)
+        return "\n".join(f"- {p}" for p in parts)
+
+    def _format_congressional_section(self, trades: List[Dict[str, Any]]) -> str:
+        if not trades:
+            return "- No trades found for tracked politicians in the last 180 days (House + Senate)"
+        buys  = [t for t in trades if "purchase" in t.get("type", "").lower()]
+        sells = [t for t in trades if "sale" in t.get("type", "").lower()]
+        parts = [
+            f"Tracked-politician trades (House + Senate): "
+            f"{len(buys)} purchase(s), {len(sells)} sale(s) in last 180 days"
+        ]
+        for t in trades[:8]:
+            chamber = t.get("chamber", "")
+            chamber_tag = f"[{chamber}] " if chamber else ""
+            parts.append(
+                f"  [{t['date']}] {chamber_tag}{t['representative']} ({t['district']}) — "
+                f"{t['type'].upper()} {t['amount']}"
+            )
+        return "\n".join(f"- {p}" if not p.startswith("  ") else p for p in parts)
+
     def _format_macro_news_section(self, articles: List[Dict[str, str]]) -> str:
         if not articles:
             return "- No macro/sector news available"
@@ -635,6 +881,44 @@ class AIResearcher(QThread):
         except Exception as exc:
             raise RuntimeError(f"Claude API request failed: {exc}") from exc
 
+    def _call_openrouter(self, prompt: str) -> str:
+        import urllib.request
+        api_key = self._settings.get("ai_openrouter_api_key", "")
+        model   = self._settings.get("ai_openrouter_model", "qwen/qwen3-coder:free")
+        if not api_key:
+            raise RuntimeError(
+                "OpenRouter API key is not set.\n"
+                "Go to Settings -> AI and enter your OpenRouter API key."
+            )
+        # Strip /no_think prefix — it's Qwen3-Ollama-specific and not needed via API
+        clean_prompt = prompt.lstrip()
+        if clean_prompt.startswith("/no_think"):
+            clean_prompt = clean_prompt[len("/no_think"):].lstrip()
+
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": clean_prompt}],
+            "stream": False,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                choices = body.get("choices", [])
+                if choices:
+                    return choices[0].get("message", {}).get("content", "")
+                return ""
+        except Exception as exc:
+            raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
+
     # ── Response parser ───────────────────────────────────────────────────────
 
     def _parse_response(self, text: str) -> Dict[str, str]:
@@ -642,26 +926,28 @@ class AIResearcher(QThread):
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
         result: Dict[str, str] = {
-            "short_term":       "",
-            "long_term":        "",
-            "catalysts":        "",
-            "sentiment":        "NEUTRAL",
-            "direction":        "SIDEWAYS",
-            "timeframe":        "",
-            "stock_strategy":   "",
-            "options_strategy": "",
-            "summary":          "",
+            "short_term":           "",
+            "long_term":            "",
+            "catalysts":            "",
+            "sentiment":            "NEUTRAL",
+            "direction":            "SIDEWAYS",
+            "timeframe":            "",
+            "congressional_signal": "NONE",
+            "stock_strategy":       "",
+            "options_strategy":     "",
+            "summary":              "",
         }
         tag_map = {
-            "SHORT_TERM:":      "short_term",
-            "LONG_TERM:":       "long_term",
-            "CATALYSTS:":       "catalysts",
-            "SENTIMENT:":       "sentiment",
-            "DIRECTION:":       "direction",
-            "TIMEFRAME:":       "timeframe",
-            "STOCK_STRATEGY:":  "stock_strategy",
-            "OPTIONS_STRATEGY:": "options_strategy",
-            "SUMMARY:":         "summary",
+            "SHORT_TERM:":           "short_term",
+            "LONG_TERM:":            "long_term",
+            "CATALYSTS:":            "catalysts",
+            "SENTIMENT:":            "sentiment",
+            "DIRECTION:":            "direction",
+            "TIMEFRAME:":            "timeframe",
+            "CONGRESSIONAL_SIGNAL:": "congressional_signal",
+            "STOCK_STRATEGY:":       "stock_strategy",
+            "OPTIONS_STRATEGY:":     "options_strategy",
+            "SUMMARY:":              "summary",
         }
         for line in text.splitlines():
             line = line.strip()
@@ -690,7 +976,7 @@ class AIResearcher(QThread):
             result["direction"] = "SIDEWAYS"
 
         # If parsing failed entirely, store the raw text in summary
-        if not any(result[k] for k in ("short_term", "long_term", "summary")):
+        if not any(result[k] for k in ("short_term", "long_term", "summary", "congressional_signal")):
             result["summary"] = text.strip()
 
         return result

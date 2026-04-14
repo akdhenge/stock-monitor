@@ -45,6 +45,10 @@ class TelegramCommandPoller(QThread):
     cmd_aifollow = pyqtSignal(str, str, str)
     # reply_chat_id
     cmd_stopaiscan = pyqtSignal(str)
+    # symbol, reply_chat_id
+    cmd_mute = pyqtSignal(str, str)
+    # symbol, side ("low"|"high"), new_price, reply_chat_id
+    cmd_revise = pyqtSignal(str, str, float, str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -154,11 +158,15 @@ class TelegramCommandPoller(QThread):
             self._handle_aiscan(parts, reply_chat_id)
         elif cmd == "/stopaiscan":
             self.cmd_stopaiscan.emit(reply_chat_id)
+        elif cmd == "/mute":
+            self._handle_mute(parts, reply_chat_id)
+        elif cmd == "/revise":
+            self._handle_revise(parts, reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
                 reply_chat_id,
-                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan /stopaiscan\n"
+                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan /stopaiscan /mute /revise\n"
                 "Tip: after /aiscan you can ask follow-up questions as plain text for 30 minutes.",
             )
 
@@ -208,3 +216,44 @@ class TelegramCommandPoller(QThread):
             return
         symbol = parts[1].upper()
         self.cmd_aiscan.emit(symbol, reply_chat_id)
+
+    def _handle_mute(self, parts: list, reply_chat_id: str) -> None:
+        # /mute SYMBOL
+        if len(parts) < 2:
+            TelegramNotifier.send_message(
+                self._token,
+                reply_chat_id,
+                "Usage: /mute SYMBOL",
+            )
+            return
+        symbol = parts[1].upper()
+        self.cmd_mute.emit(symbol, reply_chat_id)
+
+    def _handle_revise(self, parts: list, reply_chat_id: str) -> None:
+        # /revise SYMBOL low|high NEW_PRICE
+        if len(parts) < 4:
+            TelegramNotifier.send_message(
+                self._token,
+                reply_chat_id,
+                "Usage: /revise SYMBOL low|high NEW_PRICE\nExample: /revise AAPL low 145.00",
+            )
+            return
+        symbol = parts[1].upper()
+        side = parts[2].lower()
+        if side not in ("low", "high"):
+            TelegramNotifier.send_message(
+                self._token,
+                reply_chat_id,
+                "Side must be 'low' or 'high'. Example: /revise AAPL low 145.00",
+            )
+            return
+        try:
+            new_price = float(parts[3])
+        except ValueError:
+            TelegramNotifier.send_message(
+                self._token,
+                reply_chat_id,
+                "NEW_PRICE must be a number. Example: /revise AAPL low 145.00",
+            )
+            return
+        self.cmd_revise.emit(symbol, side, new_price, reply_chat_id)
