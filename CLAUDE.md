@@ -55,6 +55,8 @@ Universe is fetched from Wikipedia index pages (S&P 500/400/600, NASDAQ-100) wit
 | `/detail` | Show detailed scan table |
 | `/aiscan SYMBOL` | Run AI research on a symbol; opens a 30-minute follow-up Q&A window |
 | `/stopaiscan` | End the active `/aiscan` follow-up session immediately (frees memory) |
+| `/mute SYMBOL` | Silence price alerts for that symbol for the rest of today (auto-resets at midnight) |
+| `/revise SYMBOL low\|high NEW_PRICE` | Update a watchlist entry's low or high target price; resets cooldown so new target takes effect immediately |
 | (plain text) | Follow-up question for the active `/aiscan` session |
 
 **`/aiscan` follow-up session lifecycle:** After `/aiscan` completes, `MainWindow._on_aiscan_complete` calls `TelegramCommandPoller.register_followup_session()` which stores `{symbol, expires}` per `chat_id`. Plain-text messages are routed to `cmd_aifollow` → `AIFollowUp` QThread. `/stopaiscan` emits `cmd_stopaiscan` → `_on_cmd_stopaiscan` which clears both `_aiscan_context[chat_id]` and the poller session, freeing memory immediately.

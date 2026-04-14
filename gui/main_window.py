@@ -200,6 +200,8 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_aiscan.connect(self._on_cmd_aiscan)
         self._cmd_poller.cmd_aifollow.connect(self._on_cmd_aifollow)
         self._cmd_poller.cmd_stopaiscan.connect(self._on_cmd_stopaiscan)
+        self._cmd_poller.cmd_mute.connect(self._on_cmd_mute)
+        self._cmd_poller.cmd_revise.connect(self._on_cmd_revise)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -217,7 +219,7 @@ class MainWindow(QMainWindow):
         if self._scanner is not None and self._scanner.isRunning():
             return
         universe_size = self._settings.get("scanner_universe_size", 500)
-        self._scanner = StockScanner(mode="quick", universe_size=universe_size)
+        self._scanner = StockScanner(mode="quick", universe_size=universe_size, settings=self._settings)
         self._scanner.quick_scan_complete.connect(self._on_quick_scan_complete)
         self._scanner.scan_progress.connect(self._scanner_panel.update_progress)
         self._scanner.scan_status.connect(self._scanner_panel.update_status)
@@ -233,7 +235,7 @@ class MainWindow(QMainWindow):
         if self._scanner is not None and self._scanner.isRunning():
             return
         universe_size = self._settings.get("scanner_universe_size", 500)
-        self._scanner = StockScanner(mode="deep", universe_size=universe_size)
+        self._scanner = StockScanner(mode="deep", universe_size=universe_size, settings=self._settings)
         if candidates:
             self._scanner.set_candidates(candidates)
         elif self._quick_candidates:
@@ -256,7 +258,7 @@ class MainWindow(QMainWindow):
         if self._scanner is not None and self._scanner.isRunning():
             return
         universe_size = self._settings.get("scanner_universe_size", 500)
-        self._scanner = StockScanner(mode="complete", universe_size=universe_size)
+        self._scanner = StockScanner(mode="complete", universe_size=universe_size, settings=self._settings)
         self._scanner.set_previous_top5(self._scanner_top5)
         self._scanner.set_previous_scores(self._scanner_prev_scores)
         self._scanner.complete_scan_complete.connect(self._on_complete_scan_complete)
@@ -308,7 +310,9 @@ class MainWindow(QMainWindow):
     def _load_saved_scan_results(self) -> None:
         results = load_scan_results()
         if results:
-            self._scanner_panel.display_results(results)
+            # Use the timestamp of the most recent result so the label reflects the real scan time
+            scan_time = max(r.timestamp for r in results)
+            self._scanner_panel.display_results(results, scan_time=scan_time)
             self._scanner_top5  = {r.symbol for r in results[:5]}
             self._scanner_top10 = {r.symbol for r in results[:10]}
             self._scanner_prev_scores = {r.symbol: r.total_score for r in results}
@@ -750,7 +754,7 @@ class MainWindow(QMainWindow):
         token = self._settings.get("telegram_token", "")
         TelegramNotifier.send_message(
             token, reply_chat_id,
-            "💬 <i>You can now ask follow-up questions about this stock for the next 30 minutes.</i>"
+            "💬 <i>You can now ask follow-up questions about this stock for the next 30 minutes. Use /stopaiscan to stop</i>"
         )
 
     def _send_aiscan_telegram(self, result: dict, reply_chat_id: str) -> None:
@@ -769,6 +773,7 @@ class MainWindow(QMainWindow):
             f"<b>Long-Term:</b> {result.get('long_term', 'N/A')}",
             f"<b>Catalysts:</b> {result.get('catalysts', 'N/A')}",
             f"\n{dir_emoji} <b>Direction:</b> {direction}  |  <b>Timeframe:</b> {result.get('timeframe', 'N/A')}",
+            f"<b>Congressional Signal:</b> {result.get('congressional_signal', 'NONE')}",
             f"<b>Stock Strategy:</b> {result.get('stock_strategy', 'N/A')}",
             f"<b>Options Strategy:</b> {result.get('options_strategy', 'N/A')}",
             f"\n<b>Summary:</b> {result.get('summary', 'N/A')}",
@@ -834,6 +839,45 @@ class MainWindow(QMainWindow):
                 token, reply_chat_id,
                 "ℹ️ No active follow-up session to stop."
             )
+
+    def _on_cmd_mute(self, symbol: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        entry = next((e for e in self._watchlist if e.symbol == symbol), None)
+        if entry is None:
+            TelegramNotifier.send_message(
+                token, reply_chat_id,
+                f"⚠️ {symbol} is not in your watchlist."
+            )
+            return
+        self._alert_manager.mute_symbol(symbol)
+        TelegramNotifier.send_message(
+            token, reply_chat_id,
+            f"🔕 Alerts for <b>{symbol}</b> silenced for the rest of today."
+        )
+
+    def _on_cmd_revise(self, symbol: str, side: str, new_price: float, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        entry = next((e for e in self._watchlist if e.symbol == symbol), None)
+        if entry is None:
+            TelegramNotifier.send_message(
+                token, reply_chat_id,
+                f"⚠️ {symbol} is not in your watchlist."
+            )
+            return
+        if side == "low":
+            old = entry.low_target
+            entry.low_target = new_price
+            entry.last_low_alert = None  # reset cooldown so revised target takes effect immediately
+        else:
+            old = entry.high_target
+            entry.high_target = new_price
+            entry.last_high_alert = None
+        save_watchlist(self._watchlist)
+        self._watchlist_table.refresh(self._watchlist)
+        TelegramNotifier.send_message(
+            token, reply_chat_id,
+            f"✏️ <b>{symbol}</b> {side} target updated: ${old:.2f} → <b>${new_price:.2f}</b>"
+        )
 
     # ── Toolbar / watchlist actions ───────────────────────────────────────────
 

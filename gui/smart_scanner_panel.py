@@ -22,6 +22,22 @@ _COLS = [
 ]
 _COL_IDX = {name: i for i, name in enumerate(_COLS)}
 
+_COL_TOOLTIPS = {
+    "#":        "Rank by total score (1 = highest score)",
+    "Symbol":   "Stock ticker symbol",
+    "Total":    "Composite score (0–100).\nWeighted: Value×40% + Growth×30% + Technical×30%.\nHigher is better.",
+    "Value":    "Value score (0–100).\nDerived from P/E ratio, PEG ratio, and Debt/Equity.\nMeasures how cheap the stock is relative to its fundamentals.",
+    "Growth":   "Growth score (0–100).\nDerived from revenue growth rate and return on equity.\nMeasures business momentum.",
+    "Tech":     "Technical score (0–100).\nDerived from RSI, MACD signal, proximity to 200-day moving average, and volume spikes.",
+    "P/E":      "Price-to-Earnings ratio.\nLower = cheaper relative to earnings.\nNegative = company is currently unprofitable.",
+    "PEG":      "Price/Earnings-to-Growth ratio.\nPEG < 1.0 often indicates the stock may be undervalued relative to its growth rate.",
+    "D/E":      "Debt-to-Equity ratio.\nLower = less leveraged.\nAbove 2.0 can indicate elevated financial risk.",
+    "RevGrow%": "Year-over-year revenue growth percentage.\nHigher = faster growing company.",
+    "ROE%":     "Return on Equity.\nHow efficiently the company turns shareholder equity into profit.\nHigher is better.",
+    "RSI":      "Relative Strength Index (0–100).\n< 30 = oversold (potential buy signal).\n> 70 = overbought (potential sell signal).",
+    "AI Rank":  "AI-generated rank (1 = best).\nAfter a deep/complete scan, the top 10 stocks are ranked by the LLM.\nLower number = more compelling opportunity according to the AI.",
+}
+
 _GREEN_BG       = QColor("#d4edda")  # >= 65  strongest
 _YELLOW_BG      = QColor("#fff3cd")  # 50–64  stronger
 _ORANGE_BG      = QColor("#ffe0b2")  # 35–49  weak
@@ -105,6 +121,13 @@ class SmartScannerPanel(QWidget):
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.verticalHeader().setVisible(False)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # Column header tooltips
+        _model = self._table.model()
+        for col, name in enumerate(_COLS):
+            if name in _COL_TOOLTIPS:
+                _model.setHeaderData(col, Qt.Horizontal, _COL_TOOLTIPS[name], Qt.ToolTipRole)
+
         layout.addWidget(self._table, stretch=1)
 
         # --- Bottom action row ---
@@ -154,9 +177,9 @@ class SmartScannerPanel(QWidget):
     def update_status(self, text: str) -> None:
         self._mode_label.setText(text)
 
-    def display_results(self, results: List[ScanResult]) -> None:
+    def display_results(self, results: List[ScanResult], scan_time: Optional[datetime] = None) -> None:
         self._results = results
-        self._last_scan_time = datetime.now()
+        self._last_scan_time = scan_time or datetime.now()
         self._last_scan_label.setText(
             f"Last: {self._last_scan_time.strftime('%Y-%m-%d %H:%M')}"
         )
@@ -175,10 +198,10 @@ class SmartScannerPanel(QWidget):
             if sym_item and sym_item.text() == symbol:
                 if score is None:
                     item = QTableWidgetItem("ERR")
-                    item.setData(Qt.UserRole, 0.0)
+                    item.setData(Qt.UserRole, 999.0)  # sort last
                 else:
-                    item = QTableWidgetItem(f"{score:.1f}")
-                    item.setData(Qt.UserRole, float(score))
+                    item = QTableWidgetItem(str(int(score)))
+                    item.setData(Qt.UserRole, float(score))  # sort ascending = rank 1 first
                 item.setTextAlignment(Qt.AlignCenter)
                 # Preserve existing row background color
                 existing = self._table.item(row, 0)

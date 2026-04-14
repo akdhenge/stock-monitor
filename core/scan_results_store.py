@@ -34,6 +34,7 @@ def _result_to_dict(r: ScanResult) -> Dict[str, Any]:
         "near_200d_ma": r.near_200d_ma,
         "volume_spike": r.volume_spike,
         "scan_mode": r.scan_mode,
+        "score_congressional": r.score_congressional,
         "timestamp": r.timestamp.isoformat(),
     }
 
@@ -65,6 +66,7 @@ def _dict_to_result(d: Dict[str, Any]) -> Optional[ScanResult]:
             near_200d_ma=d.get("near_200d_ma"),
             volume_spike=d.get("volume_spike"),
             scan_mode=d.get("scan_mode", "quick"),
+            score_congressional=float(d.get("score_congressional", 0.0)),
             timestamp=ts,
         )
     except (KeyError, TypeError, ValueError):

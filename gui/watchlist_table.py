@@ -15,6 +15,15 @@ _COL_NOTES = 5
 
 _HEADERS = ["Symbol", "Price", "Low Target", "High Target", "Status", "Notes"]
 
+_HEADER_TOOLTIPS = [
+    "Stock ticker symbol (e.g. AAPL, TSLA)",
+    "Current market price — refreshed automatically on the poll interval",
+    "Your buy-zone floor.\nYou'll be alerted when the price drops to or below this target.",
+    "Your sell-zone ceiling.\nYou'll be alerted when the price rises to or above this target.",
+    "OK = price is within your range\nBELOW LOW = price hit buy target (green)\nABOVE HIGH = price hit sell target (red)",
+    "Your personal notes for this stock",
+]
+
 _COLOR_OK = QColor("#ffffff")
 _COLOR_ABOVE = QColor("#ffcccc")   # light red — sell signal
 _COLOR_BELOW = QColor("#ccffcc")   # light green — buy opportunity
@@ -32,6 +41,10 @@ class WatchlistTable(QTableWidget):
         self.horizontalHeader().setSectionResizeMode(_COL_SYMBOL, QHeaderView.ResizeToContents)
         self.horizontalHeader().setSectionResizeMode(_COL_STATUS, QHeaderView.ResizeToContents)
         self.verticalHeader().setVisible(False)
+
+        # Column header tooltips
+        for col, tip in enumerate(_HEADER_TOOLTIPS):
+            self.model().setHeaderData(col, Qt.Horizontal, tip, Qt.ToolTipRole)
 
     def refresh(self, entries: List[StockEntry]) -> None:
         self.setRowCount(len(entries))
