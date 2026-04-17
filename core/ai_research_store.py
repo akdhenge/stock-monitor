@@ -48,6 +48,21 @@ def get_cached_entry(symbol: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_cached_symbols() -> set:
+    """Return set of symbols that have a valid (non-expired) cache entry."""
+    cache = _load_cache()
+    now = datetime.now()
+    result = set()
+    for symbol, entry in cache.items():
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"])
+            if now - ts < timedelta(hours=_TTL_HOURS):
+                result.add(symbol)
+        except (KeyError, ValueError, TypeError):
+            pass
+    return result
+
+
 def save_entry(symbol: str, entry: Dict[str, Any]) -> None:
     """Merge-save a research entry; entry must contain a 'timestamp' key (ISO string)."""
     cache = _load_cache()

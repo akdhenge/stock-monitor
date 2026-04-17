@@ -23,3 +23,8 @@ env/
 
 # Claude Code local config
 .claude/
+
+# PowerShell redirect artifacts
+$null
+nul
+in

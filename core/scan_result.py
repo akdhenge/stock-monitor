@@ -25,4 +25,5 @@ class ScanResult:
     volume_spike: Optional[bool]
     scan_mode: str = "quick"
     score_congressional: float = 0.0   # 0–100, tracked-politician buy/sell signal
+    ai_rank: Optional[int] = None      # 1–10 rank assigned after AI ranking; None = not yet ranked
     timestamp: datetime = field(default_factory=datetime.now)

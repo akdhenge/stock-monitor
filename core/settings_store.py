@@ -28,6 +28,7 @@ _DEFAULTS: Dict[str, Any] = {
     "scanner_complete_scan_times_et": "09:00,13:00,16:15",
     "scanner_complete_alert_threshold": 60,
     # AI Research
+    "ai_rank_refresh_hours":    4,      # skip auto AI ranking if all top-10 are cached fresher than this
     "ai_provider":              "ollama",
     "ai_ollama_url":            "http://localhost:11434/api/generate",
     "ai_ollama_model":          "gemma4:26b",

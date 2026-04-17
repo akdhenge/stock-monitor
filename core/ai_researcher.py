@@ -16,6 +16,8 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import logging
+
 import feedparser
 import yfinance as yf
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -23,10 +25,13 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from core.ai_research_store import get_cached_entry, save_entry
 from core.scan_result import ScanResult
 
+_log = logging.getLogger(__name__)
+
 
 class AIResearcher(QThread):
     research_complete = pyqtSignal(dict)
     research_error    = pyqtSignal(str)
+    research_status   = pyqtSignal(str)   # intermediate status updates (e.g. "Fetching news…")
 
     def __init__(
         self,
@@ -55,14 +60,19 @@ class AIResearcher(QThread):
         if not self._force_refresh:
             cached = get_cached_entry(self._symbol)
             if cached:
+                _log.info("AI cache hit for %s — skipping LLM call", self._symbol)
                 self.research_complete.emit(cached)
                 return
+
+        _log.info("AI research started for %s", self._symbol)
+        self.research_status.emit(f"Fetching news for {self._symbol}…")
 
         # 2. Fetch news via yfinance
         try:
             ticker = yf.Ticker(self._symbol)
             raw_news = ticker.news or []
         except Exception as exc:
+            _log.error("Failed to fetch news for %s: %s", self._symbol, exc)
             self.research_error.emit(f"Failed to fetch news for {self._symbol}: {exc}")
             return
 
@@ -92,6 +102,7 @@ class AIResearcher(QThread):
         articles = self._merge_news_sources(yf_articles, google_articles)
 
         if not articles:
+            _log.warning("No news found for %s in the last 7 days", self._symbol)
             self.research_error.emit(
                 f"No news found for {self._symbol} in the last 7 days.\n"
                 "Try again later or check the ticker symbol."
@@ -129,6 +140,14 @@ class AIResearcher(QThread):
 
         # 6. Call LLM
         provider = self._settings.get("ai_provider", "ollama")
+        model = self._settings.get(
+            "ai_ollama_model" if provider == "ollama" else
+            "ai_claude_model" if provider == "claude" else
+            "ai_openrouter_model",
+            "?"
+        )
+        _log.info("Calling %s (%s) for %s", provider, model, self._symbol)
+        self.research_status.emit(f"Calling {provider} ({model})…")
         try:
             if provider == "claude":
                 raw_response = self._call_claude(prompt)
@@ -137,6 +156,7 @@ class AIResearcher(QThread):
             else:
                 raw_response = self._call_ollama(prompt)
         except Exception as exc:
+            _log.error("LLM call failed for %s [%s]: %s", self._symbol, provider, exc)
             self.research_error.emit(str(exc))
             return
 
@@ -149,7 +169,22 @@ class AIResearcher(QThread):
         result["timestamp"] = datetime.now().isoformat()
         result["source"]    = provider
 
-        # 8. Cache and emit
+        # 8. Validate — don't cache an empty response
+        if not any(result.get(k) for k in ("short_term", "long_term", "summary")):
+            _log.warning(
+                "LLM returned empty/unparseable response for %s — not caching", self._symbol
+            )
+            self.research_error.emit(
+                f"AI returned an empty response for {self._symbol}. Try refreshing."
+            )
+            return
+
+        # 9. Cache and emit
+        _log.info(
+            "AI research complete for %s — sentiment=%s direction=%s",
+            self._symbol, result.get("sentiment"), result.get("direction"),
+        )
+        self.research_status.emit(f"✓ Done")
         save_entry(self._symbol, result)
         self.research_complete.emit(result)
 
@@ -836,16 +871,28 @@ class AIResearcher(QThread):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-                return body.get("response", "")
-        except Exception as exc:
-            raise RuntimeError(
-                f"Ollama request failed: {exc}\n\n"
-                "Make sure Ollama is running (https://ollama.com) and the model is pulled:\n"
-                f"  ollama pull {model}"
-            ) from exc
+        _MAX_RETRIES = 1
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                    return body.get("response", "")
+            except Exception as exc:
+                is_timeout = (
+                    "timed out" in str(exc).lower()
+                    or "urlopen error" in str(exc).lower()
+                )
+                if is_timeout and attempt < _MAX_RETRIES:
+                    self.research_status.emit(
+                        f"Ollama timed out — retrying (attempt {attempt + 2}/{_MAX_RETRIES + 1})…"
+                    )
+                    _log.warning("Ollama timeout for %s, retrying…", self._symbol)
+                    continue
+                raise RuntimeError(
+                    f"Ollama request failed: {exc}\n\n"
+                    "Make sure Ollama is running and the model is pulled:\n"
+                    f"  ollama pull {model}"
+                ) from exc
 
     def _call_claude(self, prompt: str) -> str:
         import urllib.request

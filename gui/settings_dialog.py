@@ -322,6 +322,18 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(or_box)
 
+        # Auto AI ranking freshness
+        rank_box = QGroupBox("Auto AI Ranking")
+        rank_form = QFormLayout(rank_box)
+        self._ai_rank_refresh_spin = QSpinBox()
+        self._ai_rank_refresh_spin.setRange(1, 48)
+        self._ai_rank_refresh_spin.setSuffix(" hrs")
+        self._ai_rank_refresh_spin.setValue(
+            self._settings.get("ai_rank_refresh_hours", 4)
+        )
+        rank_form.addRow("Skip re-rank if fresher than:", self._ai_rank_refresh_spin)
+        layout.addWidget(rank_box)
+
         # Congressional trading signal
         cong_box = QGroupBox("Congressional Trading Signal")
         cong_form = QFormLayout(cong_box)
@@ -394,6 +406,7 @@ class SettingsDialog(QDialog):
             "scanner_complete_scan_times_et": self._complete_times_edit.text().strip(),
             "scanner_complete_alert_threshold": self._complete_threshold_spin.value(),
             "scanner_universe_size": self._universe_spin.value(),
+            "ai_rank_refresh_hours": self._ai_rank_refresh_spin.value(),
             "ai_provider":       self._ai_provider_combo.currentData(),
             "ai_ollama_url":     self._ollama_url.text().strip(),
             "ai_ollama_model":   self._ollama_model.text().strip(),

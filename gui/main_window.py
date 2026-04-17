@@ -1,13 +1,17 @@
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 from PyQt5.QtCore import Qt, QTimer
+
+_log = logging.getLogger(__name__)
 from PyQt5.QtWidgets import (
     QAction, QLabel, QMainWindow, QMessageBox, QPushButton,
     QSplitter, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
 from core.ai_followup import AIFollowUp
+from core.ai_research_store import get_cached_entry
 from core.ai_researcher import AIResearcher
 from core.alert_manager import AlertManager
 from core.models import AlertRecord, StockEntry
@@ -20,6 +24,7 @@ from core.watchlist_store import load_watchlist, save_watchlist
 from gui.add_edit_dialog import AddEditDialog
 from gui.ai_research_dialog import AIResearchDialog
 from gui.alert_history_panel import AlertHistoryPanel
+from gui.log_panel import LogPanel, setup_log_handler
 from gui.settings_dialog import SettingsDialog
 from gui.smart_scanner_panel import SmartScannerPanel
 from gui.watchlist_table import WatchlistTable
@@ -73,6 +78,7 @@ class MainWindow(QMainWindow):
         # Auto AI ranking state (top 10 after deep/complete scans)
         self._ai_rank_researchers: List[AIResearcher] = []
         self._ai_rank_pending: int = 0
+        self._ai_rank_queue_idx: int = 0   # index of the next researcher to launch
         self._ai_rank_results: Dict[str, Optional[float]] = {}  # symbol -> raw score (None=error)
         self._ai_rank_top10: List[ScanResult] = []  # held for post-ranking finalization
 
@@ -159,6 +165,11 @@ class MainWindow(QMainWindow):
         self._scanner_panel.add_to_watchlist.connect(self._add_scanner_results)
         self._scanner_panel.research_requested.connect(self._on_research_requested)
         self._tabs.addTab(self._scanner_panel, "Smart Scanner")
+
+        # Tab 3 — Logs
+        self._log_panel = LogPanel()
+        self._log_handler = setup_log_handler(self._log_panel)
+        self._tabs.addTab(self._log_panel, "Logs")
 
         # Split status bar
         self._poll_status_label = QLabel("Not yet polled")
@@ -247,7 +258,10 @@ class MainWindow(QMainWindow):
         self._scanner.scan_progress.connect(self._scanner_panel.update_progress)
         self._scanner.scan_status.connect(self._scanner_panel.update_status)
         self._scanner.scan_error.connect(
-            lambda msg: self._scan_status_label.setText(f"Scan error: {msg}")
+            lambda msg: (
+                self._scan_status_label.setText(f"Scan error: {msg}"),
+                _log.error("Deep scan error: %s", msg),
+            )
         )
         self._scanner.start()
         self._scanner_panel.set_scan_running("Deep Scan")
@@ -317,7 +331,9 @@ class MainWindow(QMainWindow):
             self._scanner_top10 = {r.symbol for r in results[:10]}
             self._scanner_prev_scores = {r.symbol: r.total_score for r in results}
 
-            # AI ranks are computed collectively after a scan; not restored from cache
+            # Seed the last-scan timestamp so the scheduler doesn't immediately
+            # trigger a new deep scan if the saved data is still fresh.
+            self._last_deep_scan_dt = scan_time
 
     # ── Price Poller slots ────────────────────────────────────────────────────
 
@@ -349,6 +365,9 @@ class MainWindow(QMainWindow):
         save_scan_results(results)
 
     def _on_deep_scan_complete(self, results: List[ScanResult]) -> None:
+        _log.info("Deep scan complete — %d stocks scored; top: %s",
+                  len(results),
+                  ", ".join(f"{r.symbol}({r.total_score:.0f})" for r in results[:5]))
         self._scanner_panel.display_results(results)
         self._scanner_panel.set_scan_idle("Deep Scan (complete)")
         self._scanner_top10 = {r.symbol for r in results[:10]}
@@ -525,7 +544,25 @@ class MainWindow(QMainWindow):
         return round(min(10.0, max(1.0, rank)), 1)
 
     def _start_auto_ai_ranking(self, results: List[ScanResult]) -> None:
-        """Launch AI research for the top 10 scan results to compute AI ranks."""
+        """Launch AI research for the top 10 scan results to compute AI ranks.
+
+        Skipped entirely if all top-10 stocks already have cached research
+        fresher than the `ai_rank_refresh_hours` setting (default 4 h).
+        """
+        top10 = results[:10]
+        if not top10:
+            return
+
+        refresh_hours = self._settings.get("ai_rank_refresh_hours", 4)
+        stale = [r for r in top10 if get_cached_entry(r.symbol) is None]
+        if not stale:
+            _log.info(
+                "Auto AI ranking skipped — all top %d stocks have cached research "
+                "< %d h old", len(top10), refresh_hours
+            )
+            # Lights are already green from _populate_table; nothing more to do
+            return
+
         # Stop any previously running rank researchers
         for r in self._ai_rank_researchers:
             if r.isRunning():
@@ -535,16 +572,19 @@ class MainWindow(QMainWindow):
         self._ai_rank_pending = 0
         self._ai_rank_results.clear()
 
-        top10 = results[:10]
-        if not top10:
-            return
-
         self._ai_rank_top10 = top10
         self._ai_rank_pending = len(top10)
+        self._ai_rank_queue_idx = 0
+        symbols = [r.symbol for r in top10]
+        _log.info("Auto AI ranking started for %d stocks: %s", len(top10), ", ".join(symbols))
         self._scan_status_label.setText(
             f"AI ranking top {len(top10)} stocks... (0/{len(top10)})"
         )
+        self._scanner_panel.set_ai_rank_status(
+            f"AI Ranking: 0/{len(top10)} stocks", visible=True
+        )
 
+        # Create all researchers but do NOT start them yet — sequential launch via queue
         for r in top10:
             researcher = AIResearcher(
                 r.symbol, r, self._settings, force_refresh=False, parent=None
@@ -556,13 +596,48 @@ class MainWindow(QMainWindow):
                 lambda err, sym=r.symbol: self._on_auto_rank_error(sym, err)
             )
             self._ai_rank_researchers.append(researcher)
-            researcher.start()
+
+        # Start only the first one; subsequent ones launched in _on_auto_rank_complete/error
+        self._launch_next_ai_rank_researcher()
+
+    def _launch_next_ai_rank_researcher(self) -> None:
+        """Start the next queued AIResearcher for auto-ranking (sequential mode)."""
+        idx = self._ai_rank_queue_idx
+        if idx >= len(self._ai_rank_researchers):
+            return
+        symbol = self._ai_rank_top10[idx].symbol
+        total = len(self._ai_rank_researchers)
+        _log.info("AI ranking: starting %s (%d/%d)", symbol, idx + 1, total)
+        self._scanner_panel.set_research_light(symbol, "yellow")
+        self._scanner_panel.set_ai_rank_status(f"AI researching {symbol} — {idx + 1}/{total}")
+        # Pipe per-stock intermediate status (fetching news, calling LLM, timeout/retry) to detail line
+        researcher = self._ai_rank_researchers[idx]
+        researcher.research_status.connect(
+            lambda msg, sym=symbol, n=idx + 1, t=total: self._scanner_panel.set_ai_rank_status(
+                f"AI researching {sym} — {n}/{t}", msg
+            )
+        )
+        researcher.start()
 
     def _on_auto_rank_complete(self, symbol: str, result: dict) -> None:
-        self._ai_rank_results[symbol] = self._compute_ai_rank(result)
+        raw = self._compute_ai_rank(result)
+        self._ai_rank_results[symbol] = raw
         self._ai_rank_pending -= 1
         total = len(self._ai_rank_researchers)
         done = total - self._ai_rank_pending
+        _log.info(
+            "AI rank received for %s — raw=%.1f  sentiment=%s  direction=%s  (%d/%d done)",
+            symbol, raw, result.get("sentiment"), result.get("direction"), done, total,
+        )
+        # Research is now cached — turn light green and refresh inline panel
+        self._scanner_panel.set_research_light(symbol, "green")
+        self._scanner_panel.refresh_research_panel(symbol)
+        self._scanner_panel.set_ai_rank_status(
+            f"AI researching {symbol} — {done}/{total}", "✓ Done"
+        )
+        # Advance queue
+        self._ai_rank_queue_idx += 1
+        self._launch_next_ai_rank_researcher()
         if self._ai_rank_pending > 0:
             self._scan_status_label.setText(
                 f"AI ranking top {total} stocks... ({done}/{total})"
@@ -576,6 +651,14 @@ class MainWindow(QMainWindow):
         self._ai_rank_pending -= 1
         total = len(self._ai_rank_researchers)
         done = total - self._ai_rank_pending
+        _log.warning("AI rank FAILED for %s: %s  (%d/%d done)", symbol, error, done, total)
+        short_err = error.split("\n")[0][:80]
+        self._scanner_panel.set_ai_rank_status(
+            f"AI researching {symbol} — {done}/{total}", f"⚠ {short_err}"
+        )
+        # Light stays red — research not cached; advance queue to continue with next stock
+        self._ai_rank_queue_idx += 1
+        self._launch_next_ai_rank_researcher()
         if self._ai_rank_pending <= 0:
             self._finalize_ai_ranking()
             self._scan_status_label.setText(f"AI ranking complete ({done}/{total})")
@@ -593,9 +676,22 @@ class MainWindow(QMainWindow):
 
         entries.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
+        rank_lines = []
         for final_rank, (symbol, _raw, _total) in enumerate(entries, start=1):
             self._ai_rank_results[symbol] = float(final_rank)
             self._scanner_panel.update_ai_rank(symbol, float(final_rank))
+            # Persist ai_rank back into the ScanResult so it survives app restarts
+            for r in self._scanner_panel._results:
+                if r.symbol == symbol:
+                    r.ai_rank = final_rank
+                    break
+            rank_lines.append(f"#{final_rank} {symbol} (raw={_raw:.1f} score={_total:.1f})")
+
+        _log.info("AI ranking finalized: %s", "  ".join(rank_lines))
+        save_scan_results(self._scanner_panel._results)
+        n = len(self._ai_rank_top10)
+        self._scanner_panel.set_ai_rank_status(f"AI Ranking complete ✓  ({n} stocks ranked)", "")
+        QTimer.singleShot(5000, lambda: self._scanner_panel.set_ai_rank_status("", visible=False))
 
     # ── Bot Command slots ─────────────────────────────────────────────────────
 
@@ -968,6 +1064,11 @@ class MainWindow(QMainWindow):
         dlg = AIResearchDialog(symbol, scan_result, self._settings, parent=self)
         self._ai_dialogs.append(dlg)
         dlg.finished.connect(lambda _: self._ai_dialogs.remove(dlg) if dlg in self._ai_dialogs else None)
+        # When dialog completes: turn light green and refresh the inline panel
+        dlg.research_complete.connect(
+            lambda sym: self._scanner_panel.set_research_light(sym, "green")
+        )
+        dlg.research_complete.connect(self._scanner_panel.refresh_research_panel)
         dlg.show()
 
     def _open_settings(self) -> None:
@@ -1004,6 +1105,7 @@ class MainWindow(QMainWindow):
             self._stop_command_poller()
 
     def closeEvent(self, event) -> None:
+        logging.getLogger().removeHandler(self._log_handler)
         if hasattr(self, "_poller") and self._poller.isRunning():
             self._poller.stop()
             self._poller.wait()
