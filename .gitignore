@@ -24,6 +24,9 @@ env/
 # Claude Code local config
 .claude/
 
+# Wrangler cache
+.wrangler/
+
 # PowerShell redirect artifacts
 $null
 nul

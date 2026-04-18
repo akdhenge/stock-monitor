@@ -752,6 +752,7 @@ class MainWindow(QMainWindow):
 
         _log.info("AI ranking finalized: %s", "  ".join(rank_lines))
         save_scan_results(self._scanner_panel._results)
+        self._web_publisher.request_publish("ai_ranking_complete")
         n = len(self._ai_rank_top10)
         self._scanner_panel.set_ai_rank_status(f"AI Ranking complete ✓  ({n} stocks ranked)", "")
         QTimer.singleShot(5000, lambda: self._scanner_panel.set_ai_rank_status("", visible=False))
