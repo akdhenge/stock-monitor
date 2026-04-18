@@ -20,7 +20,9 @@ from core.scan_result import ScanResult
 from core.scan_results_store import load_scan_results, save_scan_results
 from core.settings_store import load_settings
 from core.stock_scanner import StockScanner
-from core.watchlist_store import load_watchlist, save_watchlist
+from core.ticker_lookup import TickerLookupWorker
+from core.watchlist_store import get_watchlist_store, load_watchlist, save_watchlist
+from core.web_publisher import WebPublisher
 from gui.add_edit_dialog import AddEditDialog
 from gui.ai_research_dialog import AIResearchDialog
 from gui.alert_history_panel import AlertHistoryPanel
@@ -47,6 +49,7 @@ class MainWindow(QMainWindow):
 
         # Scanner state
         self._scanner: Optional[StockScanner] = None
+        self._lookup_worker: Optional[TickerLookupWorker] = None
         self._scanner_top5:  Set[str] = set()
         self._scanner_top10: Set[str] = set()
         self._scanner_prev_scores: Dict[str, float] = {}
@@ -62,6 +65,18 @@ class MainWindow(QMainWindow):
 
         # Command poller
         self._cmd_poller = None
+
+        # Alert records for web publishing (mirrored from alert manager callbacks)
+        self._alert_records: List[AlertRecord] = []
+
+        # Web publisher
+        self._web_publisher = WebPublisher(
+            get_settings=lambda: self._settings,
+            get_alerts=lambda: list(self._alert_records),
+        )
+        self._web_publisher.publish_succeeded.connect(self._on_publish_succeeded)
+        self._web_publisher.publish_failed.connect(self._on_publish_failed)
+        self._web_publisher.start()
 
         # AI Research dialogs — hold references so they are not garbage-collected
         self._ai_dialogs: List[AIResearchDialog] = []
@@ -131,6 +146,12 @@ class MainWindow(QMainWindow):
         quick_btn.clicked.connect(self._trigger_quick_scan)
         toolbar.addWidget(quick_btn)
 
+        toolbar.addSeparator()
+        publish_btn = QPushButton("Publish")
+        publish_btn.setToolTip("Publish current data to web snapshot")
+        publish_btn.clicked.connect(lambda: self._web_publisher.request_publish("manual"))
+        toolbar.addWidget(publish_btn)
+
         # Tab layout
         central = QWidget()
         self.setCentralWidget(central)
@@ -164,6 +185,7 @@ class MainWindow(QMainWindow):
         self._scanner_panel.request_cancel_scan.connect(self._cancel_scan)
         self._scanner_panel.add_to_watchlist.connect(self._add_scanner_results)
         self._scanner_panel.research_requested.connect(self._on_research_requested)
+        self._scanner_panel.lookup_ticker_requested.connect(self._on_lookup_requested)
         self._tabs.addTab(self._scanner_panel, "Smart Scanner")
 
         # Tab 3 — Logs
@@ -176,6 +198,24 @@ class MainWindow(QMainWindow):
         self._scan_status_label = QLabel("")
         self.statusBar().addWidget(self._poll_status_label, stretch=1)
         self.statusBar().addPermanentWidget(self._scan_status_label)
+
+        self._publish_badge = QLabel("Web: never published")
+        self._publish_badge.setStyleSheet("color: gray; padding: 0 6px;")
+        self._publish_badge.setToolTip("Click to see publish history")
+        self._publish_badge.mousePressEvent = lambda _: self._show_publish_history()
+        self.statusBar().addPermanentWidget(self._publish_badge)
+
+        # Refresh the publish badge every minute
+        self._publish_badge_timer = QTimer(self)
+        self._publish_badge_timer.timeout.connect(self._refresh_publish_badge)
+        self._publish_badge_timer.start(60_000)
+
+        # 15-min safety-net publish timer
+        self._publish_interval_timer = QTimer(self)
+        self._publish_interval_timer.timeout.connect(
+            lambda: self._web_publisher.request_publish("interval")
+        )
+        self._publish_interval_timer.start(15 * 60 * 1000)
 
     # ── Price Poller ──────────────────────────────────────────────────────────
 
@@ -294,6 +334,23 @@ class MainWindow(QMainWindow):
         self._scanner_panel.set_scan_idle("Cancelled")
         self._scan_status_label.setText("Scan cancelled.")
 
+    # ── Ticker Lookup ──────────────────────────────────────────────────────────
+
+    def _on_lookup_requested(self, symbol: str) -> None:
+        if self._lookup_worker is not None and self._lookup_worker.isRunning():
+            return
+        self._scanner_panel.set_lookup_busy(symbol)
+        self._lookup_worker = TickerLookupWorker(symbol, self._settings)
+        self._lookup_worker.lookup_complete.connect(self._on_lookup_complete)
+        self._lookup_worker.lookup_error.connect(self._on_lookup_error)
+        self._lookup_worker.start()
+
+    def _on_lookup_complete(self, result: ScanResult) -> None:
+        self._scanner_panel.add_lookup_result(result)
+
+    def _on_lookup_error(self, error: str) -> None:
+        self._scanner_panel.set_lookup_error(error)
+
     # ── Scheduler ─────────────────────────────────────────────────────────────
 
     def _check_scheduled_scans(self) -> None:
@@ -352,6 +409,10 @@ class MainWindow(QMainWindow):
 
     def _on_alert_fired(self, record: AlertRecord) -> None:
         self._history_panel.add_record(record)
+        self._alert_records.insert(0, record)
+        if len(self._alert_records) > 200:
+            self._alert_records.pop()
+        self._web_publisher.request_publish("alert")
 
     # ── Scanner slots ─────────────────────────────────────────────────────────
 
@@ -401,6 +462,7 @@ class MainWindow(QMainWindow):
         )
         save_scan_results(results)
         self._start_auto_ai_ranking(results)
+        self._web_publisher.request_publish("deep_scan_complete")
 
     def _on_deep_alert_entry(self, symbol: str, score: float) -> None:
         """Fired by scanner for new top-10 entries during deep scan."""
@@ -449,6 +511,7 @@ class MainWindow(QMainWindow):
         )
         save_scan_results(results)
         self._start_auto_ai_ranking(results)
+        self._web_publisher.request_publish("complete_scan_complete")
 
     def _on_new_top5(
         self, symbol: str, total: float, value: float, growth: float, tech: float
@@ -992,6 +1055,8 @@ class MainWindow(QMainWindow):
             self._watchlist_table.refresh(self._watchlist)
             if hasattr(self, "_poller"):
                 self._poller.update_symbols([e.symbol for e in self._watchlist])
+            get_watchlist_store().watchlist_changed.emit("add", new_entry.symbol)
+            self._web_publisher.request_publish("watchlist_changed")
 
     def _edit_stock(self) -> None:
         row = self._watchlist_table.selected_row()
@@ -1007,6 +1072,8 @@ class MainWindow(QMainWindow):
             entry.notes       = updated.notes
             save_watchlist(self._watchlist)
             self._watchlist_table.refresh(self._watchlist)
+            get_watchlist_store().watchlist_changed.emit("edit", entry.symbol)
+            self._web_publisher.request_publish("watchlist_changed")
 
     def _remove_stock(self) -> None:
         row = self._watchlist_table.selected_row()
@@ -1019,11 +1086,14 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
+            removed_symbol = self._watchlist[row].symbol
             self._watchlist.pop(row)
             save_watchlist(self._watchlist)
             self._watchlist_table.refresh(self._watchlist)
             if hasattr(self, "_poller"):
                 self._poller.update_symbols([e.symbol for e in self._watchlist])
+            get_watchlist_store().watchlist_changed.emit("remove", removed_symbol)
+            self._web_publisher.request_publish("watchlist_changed")
 
     def _manual_refresh(self) -> None:
         self._restart_poller()
@@ -1048,6 +1118,9 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_poller"):
                 self._poller.update_symbols([e.symbol for e in self._watchlist])
             self._tabs.setCurrentIndex(0)
+            for sym in added:
+                get_watchlist_store().watchlist_changed.emit("add", sym)
+            self._web_publisher.request_publish("watchlist_changed")
             QMessageBox.information(
                 self, "Added to Watchlist", f"Added: {', '.join(added)}"
             )
@@ -1077,6 +1150,69 @@ class MainWindow(QMainWindow):
             self._settings = dlg.get_settings()
             self._apply_settings(self._settings)
             self._restart_poller()
+
+    # ── Publish badge ─────────────────────────────────────────────────────────
+
+    def _on_publish_succeeded(self, trigger: str, utc: str) -> None:
+        self._refresh_publish_badge()
+
+    def _on_publish_failed(self, trigger: str, error: str) -> None:
+        self._publish_badge.setText("Web: publish failed")
+        self._publish_badge.setStyleSheet("color: red; padding: 0 6px;")
+        self._publish_badge.setToolTip(f"Last error: {error}")
+
+    def _refresh_publish_badge(self) -> None:
+        info = self._web_publisher.get_last_publish_info()
+        last_utc = info.get("last_utc")
+        if last_utc is None:
+            self._publish_badge.setText("Web: never published")
+            self._publish_badge.setStyleSheet("color: gray; padding: 0 6px;")
+            return
+        try:
+            from datetime import timezone
+            last_dt = datetime.strptime(last_utc, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            from datetime import timezone as tz
+            now_utc = datetime.now(tz.utc)
+            age_min = int((now_utc - last_dt).total_seconds() / 60)
+            if age_min < 60:
+                age_str = f"{age_min}m ago"
+                color = "green"
+            elif age_min < 1440:
+                age_str = f"{age_min // 60}h ago"
+                color = "darkorange"
+            else:
+                age_str = f"{age_min // 1440}d ago"
+                color = "red"
+            trigger = info.get("last_trigger", "")
+            self._publish_badge.setText(f"Web: {age_str}")
+            self._publish_badge.setStyleSheet(f"color: {color}; padding: 0 6px;")
+            self._publish_badge.setToolTip(
+                f"Last published: {last_utc} UTC\nTrigger: {trigger}\nClick for history"
+            )
+        except Exception:
+            pass
+
+    def _show_publish_history(self) -> None:
+        from PyQt5.QtWidgets import QDialog, QTextEdit, QVBoxLayout
+        info = self._web_publisher.get_last_publish_info()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Publish History")
+        dlg.setMinimumWidth(420)
+        layout = QVBoxLayout(dlg)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        lines = []
+        for evt in info.get("history", []):
+            status = "✓" if evt["outcome"] == "ok" else "✗"
+            line = f"{status} [{evt['utc']}]  trigger={evt['trigger']}"
+            if evt["error"]:
+                line += f"  err={evt['error'][:60]}"
+            lines.append(line)
+        text.setPlainText("\n".join(lines) if lines else "No publish events yet.")
+        layout.addWidget(text)
+        dlg.exec_()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1119,4 +1255,7 @@ class MainWindow(QMainWindow):
                 r.stop()
                 r.wait(2000)
         self._ai_rank_researchers.clear()
+        if self._web_publisher.isRunning():
+            self._web_publisher.stop()
+            self._web_publisher.wait(3000)
         event.accept()

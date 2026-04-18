@@ -9,7 +9,7 @@ from typing import List, Optional
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox,
+    QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
     QProgressBar, QPushButton, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget,
 )
@@ -40,6 +40,7 @@ _COL_TOOLTIPS = {
     "Rsrch":    "AI research status.\n🟢 Green = cached analysis available (< 6 hrs).\n🟡 Yellow = AI ranking in progress.\n🔴 Red = no cached research.\nRight-click any row to run AI Research.",
 }
 
+_LOOKUP_BG = QColor("#dce8f7")  # lookup table row background
 _GREEN_BG       = QColor("#d4edda")  # >= 65  strongest
 _YELLOW_BG      = QColor("#fff3cd")  # 50–64  stronger
 _ORANGE_BG      = QColor("#ffe0b2")  # 35–49  weak
@@ -84,10 +85,13 @@ class SmartScannerPanel(QWidget):
     request_cancel_scan = pyqtSignal()
     # Emitted when user clicks "AI Research" with exactly 1 row selected
     research_requested = pyqtSignal(str)  # symbol
+    # Emitted when user requests a single-ticker lookup
+    lookup_ticker_requested = pyqtSignal(str)  # symbol
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._results: List[ScanResult] = []
+        self._lookup_results: List[ScanResult] = []
         self._last_scan_time: Optional[datetime] = None
         self._setup_ui()
 
@@ -158,6 +162,61 @@ class SmartScannerPanel(QWidget):
         status_row.addWidget(self._ai_rank_detail_label)
 
         layout.addLayout(status_row)
+
+        # --- Ticker lookup row ---
+        lookup_row = QHBoxLayout()
+
+        self._lookup_input = QLineEdit()
+        self._lookup_input.setPlaceholderText("Lookup ticker (e.g. AAPL)…")
+        self._lookup_input.setMaximumWidth(200)
+        self._lookup_input.returnPressed.connect(self._on_lookup_clicked)
+        lookup_row.addWidget(self._lookup_input)
+
+        self._lookup_btn = QPushButton("Lookup")
+        self._lookup_btn.clicked.connect(self._on_lookup_clicked)
+        lookup_row.addWidget(self._lookup_btn)
+
+        self._lookup_clear_btn = QPushButton("Clear")
+        self._lookup_clear_btn.setEnabled(False)
+        self._lookup_clear_btn.clicked.connect(self._on_lookup_clear)
+        lookup_row.addWidget(self._lookup_clear_btn)
+
+        self._lookup_status = QLabel("")
+        self._lookup_status.setStyleSheet("color: #555; font-size: 11px; padding: 0 8px;")
+        lookup_row.addWidget(self._lookup_status)
+
+        lookup_row.addStretch()
+        layout.addLayout(lookup_row)
+
+        # --- Lookup results section (hidden until a lookup is performed) ---
+        self._lookup_section = QWidget()
+        self._lookup_section.setVisible(False)
+        lookup_sec_layout = QVBoxLayout(self._lookup_section)
+        lookup_sec_layout.setContentsMargins(0, 4, 0, 0)
+        lookup_sec_layout.setSpacing(2)
+
+        lookup_sec_label = QLabel("  🔍  Lookup Results")
+        lookup_sec_label.setStyleSheet(
+            "background: #1565c0; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        lookup_sec_layout.addWidget(lookup_sec_label)
+
+        self._lookup_table = QTableWidget(0, len(_COLS))
+        self._lookup_table.setHorizontalHeaderLabels(_COLS)
+        self._lookup_table.setSortingEnabled(True)
+        self._lookup_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._lookup_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._lookup_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._lookup_table.horizontalHeader().setStretchLastSection(False)
+        self._lookup_table.verticalHeader().setVisible(False)
+        self._lookup_table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._lookup_table.currentItemChanged.connect(self._on_current_item_changed)
+        self._lookup_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._lookup_table.customContextMenuRequested.connect(self._show_context_menu)
+        self._lookup_table.setMaximumHeight(110)
+        lookup_sec_layout.addWidget(self._lookup_table)
+        layout.addWidget(self._lookup_section)
 
         # --- Results table ---
         self._table = QTableWidget(0, len(_COLS))
@@ -267,6 +326,27 @@ class SmartScannerPanel(QWidget):
         self._refresh_last_scan_label()
         self._populate_table(results)
 
+    # ── Lookup public API ─────────────────────────────────────────────────────
+
+    def set_lookup_busy(self, symbol: str) -> None:
+        self._lookup_status.setText(f"Looking up {symbol}…")
+        self._lookup_btn.setEnabled(False)
+        self._lookup_input.setEnabled(False)
+
+    def add_lookup_result(self, result: ScanResult) -> None:
+        self._lookup_results = [r for r in self._lookup_results if r.symbol != result.symbol]
+        self._lookup_results.append(result)
+        self._lookup_status.setText(f"Scored: {result.symbol}  (total {result.total_score:.1f})")
+        self._lookup_btn.setEnabled(True)
+        self._lookup_input.setEnabled(True)
+        self._lookup_clear_btn.setEnabled(True)
+        self._populate_lookup_table()
+
+    def set_lookup_error(self, error: str) -> None:
+        self._lookup_status.setText(f"Error: {error}")
+        self._lookup_btn.setEnabled(True)
+        self._lookup_input.setEnabled(True)
+
     def _refresh_last_scan_label(self) -> None:
         """Update the last-scan label with a relative time string and staleness color."""
         if self._last_scan_time is None:
@@ -322,6 +402,71 @@ class SmartScannerPanel(QWidget):
                 break
 
     # ── Table ─────────────────────────────────────────────────────────────────
+
+    def _populate_lookup_table(self) -> None:
+        self._lookup_table.setSortingEnabled(False)
+        self._lookup_table.setRowCount(0)
+
+        def _num_item(val, fmt="{:.1f}") -> _NumericItem:
+            if val is None:
+                item = _NumericItem("—")
+                item.setData(Qt.UserRole, -1.0)
+            else:
+                item = _NumericItem(fmt.format(val))
+                item.setData(Qt.UserRole, float(val))
+            item.setTextAlignment(Qt.AlignCenter)
+            return item
+
+        def _pct_item(val) -> _NumericItem:
+            if val is None:
+                item = _NumericItem("—")
+                item.setData(Qt.UserRole, -999.0)
+            else:
+                item = _NumericItem(f"{val * 100:.1f}%")
+                item.setData(Qt.UserRole, float(val))
+            item.setTextAlignment(Qt.AlignCenter)
+            return item
+
+        for r in self._lookup_results:
+            row = self._lookup_table.rowCount()
+            self._lookup_table.insertRow(row)
+
+            rank_item = _NumericItem("—")
+            rank_item.setData(Qt.UserRole, -9999.0)
+            rank_item.setTextAlignment(Qt.AlignCenter)
+
+            ai_rank_item = _NumericItem("—")
+            ai_rank_item.setData(Qt.UserRole, 9999.0)
+            ai_rank_item.setTextAlignment(Qt.AlignCenter)
+
+            ai_status_item = QTableWidgetItem("●")
+            ai_status_item.setForeground(_LIGHT_RED)
+            ai_status_item.setTextAlignment(Qt.AlignCenter)
+
+            items = [
+                rank_item,
+                QTableWidgetItem(r.symbol),
+                _num_item(r.total_score),
+                _num_item(r.score_value),
+                _num_item(r.score_growth),
+                _num_item(r.score_technical),
+                _num_item(r.pe_ratio),
+                _num_item(r.peg_ratio),
+                _num_item(r.debt_equity),
+                _pct_item(r.revenue_growth),
+                _pct_item(r.roe),
+                _num_item(r.rsi, fmt="{:.0f}"),
+                ai_rank_item,
+                ai_status_item,
+            ]
+            items[1].setTextAlignment(Qt.AlignCenter)
+
+            for col, item in enumerate(items):
+                self._lookup_table.setItem(row, col, item)
+                item.setBackground(_LOOKUP_BG)
+
+        self._lookup_table.setSortingEnabled(True)
+        self._lookup_section.setVisible(bool(self._lookup_results))
 
     def _populate_table(self, results: List[ScanResult]) -> None:
         self._table.setSortingEnabled(False)
@@ -413,34 +558,54 @@ class SmartScannerPanel(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
+    def _on_lookup_clicked(self) -> None:
+        sym = self._lookup_input.text().strip().upper()
+        if not sym:
+            return
+        self.lookup_ticker_requested.emit(sym)
+
+    def _on_lookup_clear(self) -> None:
+        self._lookup_results.clear()
+        self._lookup_status.setText("")
+        self._lookup_clear_btn.setEnabled(False)
+        self._populate_lookup_table()
+
     def _on_add_selected(self) -> None:
         selected_rows = set(
             index.row() for index in self._table.selectedIndexes()
         )
-        if not selected_rows:
+        lookup_rows = {i.row() for i in self._lookup_table.selectedIndexes()}
+        if not selected_rows and not lookup_rows:
             QMessageBox.information(
                 self, "Add to Watchlist", "Select one or more rows first."
             )
             return
 
-        # Map table row → ScanResult via symbol column
+        # Map table row → ScanResult from scan table
         selected_results = []
         for row in selected_rows:
             sym_item = self._table.item(row, _COL_IDX["Symbol"])
             if sym_item:
-                sym = sym_item.text()
-                for r in self._results:
-                    if r.symbol == sym:
-                        selected_results.append(r)
-                        break
+                found = next((r for r in self._results if r.symbol == sym_item.text()), None)
+                if found is not None:
+                    selected_results.append(found)
+
+        # Also check lookup table
+        for row in lookup_rows:
+            sym_item = self._lookup_table.item(row, _COL_IDX["Symbol"])
+            if sym_item:
+                found = next((r for r in self._lookup_results if r.symbol == sym_item.text()), None)
+                if found is not None:
+                    selected_results.append(found)
 
         if selected_results:
             self.add_to_watchlist.emit(selected_results)
 
     def _on_selection_changed(self) -> None:
         """Enable/disable the AI Research button based on selection count."""
-        selected_rows = {item.row() for item in self._table.selectedItems()}
-        self._research_btn.setEnabled(len(selected_rows) == 1)
+        n_main = len({item.row() for item in self._table.selectedItems()})
+        n_lookup = len({item.row() for item in self._lookup_table.selectedItems()})
+        self._research_btn.setEnabled(n_main + n_lookup == 1)
 
     def _on_current_item_changed(self, current, previous) -> None:
         """Update the inline research panel when the user moves to a new row.
@@ -455,32 +620,35 @@ class SmartScannerPanel(QWidget):
         """
         if current is None:
             return
-        sym_item = self._table.item(current.row(), _COL_IDX["Symbol"])
+        tbl = current.tableWidget()
+        sym_item = tbl.item(current.row(), _COL_IDX["Symbol"])
         if sym_item:
             self._research_panel.show_symbol(sym_item.text())
 
     def _on_research_clicked(self) -> None:
-        selected_items = self._table.selectedItems()
-        selected_rows = {item.row() for item in selected_items}
-        if len(selected_rows) != 1:
-            return
-        for item in selected_items:
-            if item.column() == _COL_IDX["Symbol"]:
-                self.research_requested.emit(item.text())
-                break
+        for tbl in (self._table, self._lookup_table):
+            selected_items = tbl.selectedItems()
+            if not selected_items:
+                continue
+            selected_rows = {item.row() for item in selected_items}
+            if len(selected_rows) == 1:
+                for item in selected_items:
+                    if item.column() == _COL_IDX["Symbol"]:
+                        self.research_requested.emit(item.text())
+                        return
 
     def _show_context_menu(self, pos) -> None:
-        item = self._table.itemAt(pos)
+        tbl = self.sender()
+        item = tbl.itemAt(pos)
         if item is None:
             return
-        row = item.row()
-        sym_item = self._table.item(row, _COL_IDX["Symbol"])
+        sym_item = tbl.item(item.row(), _COL_IDX["Symbol"])
         if not sym_item:
             return
         symbol = sym_item.text()
         menu = QMenu(self)
         action = menu.addAction(f"AI Research: {symbol}")
-        chosen = menu.exec_(self._table.viewport().mapToGlobal(pos))
+        chosen = menu.exec_(tbl.viewport().mapToGlobal(pos))
         if chosen == action:
             self.research_requested.emit(symbol)
 
@@ -494,13 +662,14 @@ class SmartScannerPanel(QWidget):
         color_map = {"red": _LIGHT_RED, "yellow": _LIGHT_YELLOW, "green": _LIGHT_GREEN}
         color = color_map.get(state, _LIGHT_RED)
         col = _COL_IDX["Rsrch"]
-        for row in range(self._table.rowCount()):
-            sym_item = self._table.item(row, _COL_IDX["Symbol"])
-            if sym_item and sym_item.text() == symbol:
-                cell = self._table.item(row, col)
-                if cell:
-                    cell.setForeground(color)
-                break
+        for tbl in (self._table, self._lookup_table):
+            for row in range(tbl.rowCount()):
+                sym_item = tbl.item(row, _COL_IDX["Symbol"])
+                if sym_item and sym_item.text() == symbol:
+                    cell = tbl.item(row, col)
+                    if cell:
+                        cell.setForeground(color)
+                    break
 
     def refresh_research_panel(self, symbol: str) -> None:
         """Re-render the inline research panel if it's currently showing `symbol`."""

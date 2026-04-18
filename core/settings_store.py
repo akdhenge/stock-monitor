@@ -38,6 +38,16 @@ _DEFAULTS: Dict[str, Any] = {
     "ai_openrouter_model":      "qwen/qwen3-coder:free",
     # Congressional trading signal
     "congressional_tracked_politicians": "Nancy Pelosi,Tommy Tuberville,Josh Gottheimer,Michael McCaul,John Hickenlooper,Tom Cotton",
+    # Web publishing
+    "web_publishing_enabled": False,
+    "web_publish_interval_minutes": 15,
+    "web_public_url": "https://trader.akshaydhenge.uk",
+    "r2_account_id": "",
+    "r2_access_key_id": "",
+    "r2_secret_access_key": "",
+    "r2_bucket": "trader-data",
+    "r2_endpoint_url": "",
+    "r2_public_base_url": "https://data.trader.akshaydhenge.uk",
 }
 
 
@@ -63,3 +73,18 @@ def save_settings(settings: Dict[str, Any]) -> None:
     _ensure_data_dir()
     with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
+
+
+_REDACTED_KEYS = {
+    "telegram_token", "ai_claude_api_key", "ai_openrouter_api_key",
+    "email_password", "r2_secret_access_key",
+}
+
+
+def get_safe_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of settings with secret fields replaced by '***'."""
+    safe = dict(settings)
+    for key in _REDACTED_KEYS:
+        if key in safe and safe[key]:
+            safe[key] = "***"
+    return safe

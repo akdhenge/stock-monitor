@@ -28,6 +28,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_email_tab(), "Email")
         tabs.addTab(self._build_scanner_tab(), "Scanner")
         tabs.addTab(self._build_ai_tab(), "AI")
+        tabs.addTab(self._build_web_tab(), "Web Publishing")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save_and_accept)
@@ -369,6 +370,84 @@ class SettingsDialog(QDialog):
 
         return w
 
+    # ── Web Publishing Tab ────────────────────────────────────────────────────
+
+    def _build_web_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(10)
+
+        self._web_enabled = QCheckBox("Enable web publishing")
+        self._web_enabled.setChecked(self._settings.get("web_publishing_enabled", False))
+        layout.addWidget(self._web_enabled)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self._web_interval_spin = QSpinBox()
+        self._web_interval_spin.setRange(5, 120)
+        self._web_interval_spin.setSuffix(" min")
+        self._web_interval_spin.setValue(self._settings.get("web_publish_interval_minutes", 15))
+        form.addRow("Safety-net interval:", self._web_interval_spin)
+
+        r2_box = QGroupBox("Cloudflare R2 credentials (for Phase 2 upload)")
+        r2_form = QFormLayout(r2_box)
+
+        self._r2_account_id = QLineEdit(self._settings.get("r2_account_id", ""))
+        self._r2_account_id.setPlaceholderText("Cloudflare account ID")
+        r2_form.addRow("Account ID:", self._r2_account_id)
+
+        self._r2_access_key = QLineEdit(self._settings.get("r2_access_key_id", ""))
+        self._r2_access_key.setPlaceholderText("Access key ID")
+        r2_form.addRow("Access Key ID:", self._r2_access_key)
+
+        self._r2_secret_key = QLineEdit(self._settings.get("r2_secret_access_key", ""))
+        self._r2_secret_key.setEchoMode(QLineEdit.Password)
+        self._r2_secret_key.setPlaceholderText("Secret access key")
+        r2_form.addRow("Secret Key:", self._r2_secret_key)
+
+        self._r2_bucket = QLineEdit(self._settings.get("r2_bucket", "trader-data"))
+        r2_form.addRow("Bucket name:", self._r2_bucket)
+
+        self._r2_public_base_url = QLineEdit(
+            self._settings.get("r2_public_base_url", "https://data.trader.akshaydhenge.uk")
+        )
+        r2_form.addRow("Public base URL:", self._r2_public_base_url)
+
+        layout.addWidget(r2_box)
+
+        test_r2_btn = QPushButton("Test R2 Connection")
+        test_r2_btn.clicked.connect(self._test_r2)
+        layout.addWidget(test_r2_btn)
+
+        layout.addStretch()
+
+        note = QLabel(
+            "Install boto3 for R2 upload: py -3.9 -m pip install boto3\n"
+            "Without R2 credentials, publishing writes locally to data/web_publish/ only.\n"
+            "Local preview: py -3.9 -m http.server 8000  →  http://localhost:8000/web/"
+        )
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
+        return w
+
+    def _test_r2(self) -> None:
+        from core.web_publisher import WebPublisher
+        tmp_settings = {
+            "r2_account_id":       self._r2_account_id.text().strip(),
+            "r2_access_key_id":    self._r2_access_key.text().strip(),
+            "r2_secret_access_key": self._r2_secret_key.text().strip(),
+            "r2_bucket":           self._r2_bucket.text().strip(),
+            "r2_endpoint_url":     "",
+        }
+        pub = WebPublisher(get_settings=lambda: tmp_settings, get_alerts=lambda: [])
+        ok, msg = pub.test_r2_connection(tmp_settings)
+        if ok:
+            QMessageBox.information(self, "R2 Connection", msg)
+        else:
+            QMessageBox.warning(self, "R2 Connection", msg)
+
     def _test_email(self) -> None:
         notifier = EmailNotifier(
             smtp_host=self._smtp_host.text().strip(),
@@ -419,6 +498,13 @@ class SettingsDialog(QDialog):
                 for line in self._congressional_politicians_edit.toPlainText().splitlines()
                 if line.strip()
             ),
+            "web_publishing_enabled": self._web_enabled.isChecked(),
+            "web_publish_interval_minutes": self._web_interval_spin.value(),
+            "r2_account_id": self._r2_account_id.text().strip(),
+            "r2_access_key_id": self._r2_access_key.text().strip(),
+            "r2_secret_access_key": self._r2_secret_key.text().strip(),
+            "r2_bucket": self._r2_bucket.text().strip(),
+            "r2_public_base_url": self._r2_public_base_url.text().strip(),
         })
         save_settings(self._settings)
         self.accept()

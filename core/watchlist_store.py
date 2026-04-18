@@ -1,11 +1,27 @@
 import json
 import os
-from typing import List
+from typing import List, Optional
+
+from PyQt5.QtCore import QObject, pyqtSignal
 
 from core.models import StockEntry
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 _WATCHLIST_PATH = os.path.join(_DATA_DIR, "watchlist.json")
+
+
+class WatchlistStore(QObject):
+    watchlist_changed = pyqtSignal(str, str)  # (action, symbol)
+
+
+_instance: Optional[WatchlistStore] = None
+
+
+def get_watchlist_store() -> WatchlistStore:
+    global _instance
+    if _instance is None:
+        _instance = WatchlistStore()
+    return _instance
 
 
 def _ensure_data_dir():
