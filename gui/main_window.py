@@ -620,10 +620,15 @@ class MainWindow(QMainWindow):
         stale = [r for r in top10 if get_cached_entry(r.symbol) is None]
         if not stale:
             _log.info(
-                "Auto AI ranking skipped — all top %d stocks have cached research "
-                "< %d h old", len(top10), refresh_hours
+                "Auto AI ranking: all top %d stocks cached — computing ranks from cache",
+                len(top10),
             )
-            # Lights are already green from _populate_table; nothing more to do
+            self._ai_rank_top10 = top10
+            self._ai_rank_results = {
+                r.symbol: self._compute_ai_rank(get_cached_entry(r.symbol))
+                for r in top10
+            }
+            self._finalize_ai_ranking()
             return
 
         # Stop any previously running rank researchers
