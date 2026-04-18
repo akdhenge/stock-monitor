@@ -1,63 +1,74 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stock Monitor — trader.akshaydhenge.uk</title>
+  <title>Stonks Monitor 🚀 — trader.akshaydhenge.uk</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="app.css">
   <link rel="manifest" href="manifest.webmanifest">
 </head>
+
 <body>
 
-<header>
-  <div class="brand">
-    <span class="brand-name">Stock Monitor</span>
-    <span class="brand-sub">trader.akshaydhenge.uk</span>
+  <header>
+    <div class="brand">
+      <span class="brand-name">Stonks Monitor 🚀</span>
+      <span class="brand-sub">trader.akshaydhenge.uk</span>
+    </div>
+    <span id="freshness-badge" class="freshness-badge unknown">Summoning market spirits…</span>
+  </header>
+
+  <div id="stale-banner" class="stale-banner" style="display:none"></div>
+
+  <div id="error-banner" class="error-banner" style="display:none">
+    <strong>Can't reach data server.</strong>
+    <span class="err-msg"></span>
+    <br>
+    <button onclick="refresh()">Retry</button>
   </div>
-  <span id="freshness-badge" class="freshness-badge unknown">Connecting…</span>
-</header>
 
-<div id="stale-banner" class="stale-banner" style="display:none"></div>
+  <nav class="tab-bar" role="tablist">
+    <button role="tab" data-panel="panel-top-picks" aria-selected="true">Top Picks</button>
+    <button role="tab" data-panel="panel-watchlist" aria-selected="false">Watchlist</button>
+    <button role="tab" data-panel="panel-alerts" aria-selected="false">Alerts</button>
+    <button role="tab" data-panel="panel-ai" aria-selected="false">AI Research</button>
+    <button role="tab" data-panel="panel-history" aria-selected="false">History</button>
+  </nav>
 
-<div id="error-banner" class="error-banner" style="display:none">
-  <strong>Can't reach data server.</strong>
-  <span class="err-msg"></span>
-  <br>
-  <button onclick="refresh()">Retry</button>
-</div>
+  <section id="panel-top-picks" class="tab-panel active" role="tabpanel">
+    <div class="empty-state">Loading scan data…</div>
+  </section>
 
-<nav class="tab-bar" role="tablist">
-  <button role="tab" data-panel="panel-top-picks" aria-selected="true">Top Picks</button>
-  <button role="tab" data-panel="panel-watchlist"  aria-selected="false">Watchlist</button>
-  <button role="tab" data-panel="panel-alerts"     aria-selected="false">Alerts</button>
-  <button role="tab" data-panel="panel-ai"         aria-selected="false">AI Research</button>
-  <button role="tab" data-panel="panel-history"    aria-selected="false">History</button>
-</nav>
+  <section id="panel-watchlist" class="tab-panel" role="tabpanel">
+    <div class="empty-state">Loading watchlist…</div>
+  </section>
 
-<section id="panel-top-picks" class="tab-panel active" role="tabpanel">
-  <div class="empty-state">Loading scan data…</div>
-</section>
+  <section id="panel-alerts" class="tab-panel" role="tabpanel">
+    <div class="empty-state">Loading alerts…</div>
+  </section>
 
-<section id="panel-watchlist" class="tab-panel" role="tabpanel">
-  <div class="empty-state">Loading watchlist…</div>
-</section>
+  <section id="panel-ai" class="tab-panel" role="tabpanel">
+    <div class="empty-state">Loading AI research…</div>
+  </section>
 
-<section id="panel-alerts" class="tab-panel" role="tabpanel">
-  <div class="empty-state">Loading alerts…</div>
-</section>
+  <section id="panel-history" class="tab-panel" role="tabpanel">
+    <div class="empty-state">Loading history…</div>
+  </section>
 
-<section id="panel-ai" class="tab-panel" role="tabpanel">
-  <div class="empty-state">Loading AI research…</div>
-</section>
+  <footer>
+    For personal use — definitely NOT financial advice. Pls don't sue.
+    <div style="margin-top: 12px;">
+      <strong style="font-size: 1.5em; color: #ff9800;">
+        स्टॉक मार्केट में निवेश बाज़ार के जोखिमों के अधीन है।
+        निवेश करने से पहले सभी संबंधित दस्तावेज़ ध्यान से पढ़ें।
+      </strong>
+    </div>
+  </footer>
 
-<section id="panel-history" class="tab-panel" role="tabpanel">
-  <div class="empty-state">Loading history…</div>
-</section>
-
-<footer>For personal use — not investment advice &nbsp;·&nbsp; auto-refreshes per publish interval</footer>
-
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
+
 </html>

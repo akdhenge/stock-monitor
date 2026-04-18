@@ -120,7 +120,7 @@ function renderAll() {
 function renderTopPicks() {
   const el = document.getElementById("panel-top-picks");
   const latest = state.latest;
-  if (!latest) { el.innerHTML = '<div class="empty-state">No scan data yet.</div>'; return; }
+  if (!latest) { el.innerHTML = '<div class="empty-state">No scan data yet. (Praying for green candles 🙏)</div>'; return; }
 
   let html = "";
 
@@ -132,7 +132,7 @@ function renderTopPicks() {
   const completeTs   = latest.complete?.scan_timestamp_utc;
   html += renderScanTable("Complete Scan — Top 5", completeRows, completeTs, 5, "tbl-complete");
 
-  el.innerHTML = html || '<div class="empty-state">No scan results available.</div>';
+  el.innerHTML = html || '<div class="empty-state">No scan results available. (Praying for green candles 🙏)</div>';
 }
 
 // Column definitions: [label, dataKey, tooltip, defaultDir (-1=desc, 1=asc)]
@@ -234,7 +234,7 @@ function toggleSort(tableId, col) {
 function renderWatchlist() {
   const el = document.getElementById("panel-watchlist");
   const data = state.watchlist;
-  if (!data?.entries?.length) { el.innerHTML = '<div class="empty-state">Watchlist is empty.</div>'; return; }
+  if (!data?.entries?.length) { el.innerHTML = '<div class="empty-state">Watchlist is empty. Have you tried buying the dip?</div>'; return; }
 
   let html = `<div class="card"><div class="card-title">Watchlist — ${fmtUTC(data.updated_utc)}</div>
   <table><thead><tr>
@@ -269,7 +269,7 @@ let alertFilter = "all";
 function renderAlerts() {
   const el = document.getElementById("panel-alerts");
   const data = state.alerts;
-  if (!data?.events?.length) { el.innerHTML = '<div class="empty-state">No alerts yet.</div>'; return; }
+  if (!data?.events?.length) { el.innerHTML = '<div class="empty-state">No alerts yet. It\\'s too quiet... suspiciously quiet.</div>'; return; }
 
   const filtered = alertFilter === "all"
     ? data.events

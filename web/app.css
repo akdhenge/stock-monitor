@@ -2,45 +2,25 @@
 
 /* ── Design tokens ── */
 :root {
-  --bg:        #08090e;
-  --surface:   #0f1118;
-  --surface-2: #151a24;
-  --border:    #1d2235;
-  --border-2:  #252c42;
-  --text:      #dde1f0;
-  --text-dim:  #9098b8;
-  --muted:     #515878;
-  --accent:    #e8c84a;       /* terminal gold */
-  --accent-dim:#e8c84a28;
-  --green:     #4ade80;
-  --amber:     #fb923c;
-  --red:       #f87171;
-  --cyan:      #38bdf8;
-  --radius:    6px;
-  --radius-lg: 10px;
+  --bg:        #050806;
+  --surface:   #0d1410bb;
+  --surface-2: #141c17;
+  --border:    #1d2a21;
+  --border-2:  #27382d;
+  --text:      #e2f0e6;
+  --text-dim:  #94b0a0;
+  --muted:     #526b5d;
+  --accent:    #00ff88;
+  --accent-dim:#00ff8822;
+  --green:     #10b981;
+  --amber:     #f59e0b;
+  --red:       #ef4444;
+  --cyan:      #0ea5e9;
+  --radius:    8px;
+  --radius-lg: 12px;
   --font-data: 'JetBrains Mono', monospace;
   --font-body: 'Figtree', sans-serif;
   --font-brand:'Fraunces', serif;
-}
-
-/* light mode override */
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg:        #f0f2f8;
-    --surface:   #ffffff;
-    --surface-2: #f5f7fc;
-    --border:    #dce0f0;
-    --border-2:  #cdd3e8;
-    --text:      #141828;
-    --text-dim:  #4a5070;
-    --muted:     #8890b0;
-    --accent:    #c8a030;
-    --accent-dim:#c8a03018;
-    --green:     #16a34a;
-    --amber:     #ea580c;
-    --red:       #dc2626;
-    --cyan:      #0284c7;
-  }
 }
 
 /* ── Reset ── */
@@ -50,7 +30,8 @@ html { scroll-behavior: smooth; }
 
 body {
   font-family: var(--font-body);
-  background: var(--bg);
+  background: radial-gradient(circle at 50% 0%, #0a1410 0%, var(--bg) 60%);
+  background-attachment: fixed;
   color: var(--text);
   min-height: 100vh;
   font-size: 13.5px;
@@ -207,12 +188,14 @@ header {
 /* ── Cards ── */
 .card {
   background: var(--surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 0;
   margin-bottom: 16px;
   overflow: hidden;
-  box-shadow: 0 1px 3px #00000033, 0 4px 16px #00000022;
+  box-shadow: 0 4px 24px #00000044, inset 0 1px 0 #ffffff0a;
 }
 
 .card-title {
