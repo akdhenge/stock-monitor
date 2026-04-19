@@ -7,11 +7,37 @@
   <title>Stonks Monitor 🚀 — trader.akshaydhenge.uk</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="app-v2.css">
   <link rel="manifest" href="manifest.webmanifest">
 </head>
 
 <body>
+  <div id="loading-screen" class="loading-screen">
+    <video autoplay muted playsinline class="loading-video" id="loading-video">
+      <source src="Retro_Pixel_Art_Animation_Gen.mp4" type="video/mp4">
+    </video>
+    <div class="loading-text">DIAMOND HANDS ACTIVATED... 🚀</div>
+  </div>
+
+  <div id="disclaimer-screen" class="disclaimer-screen" style="display: none;">
+    <div id="disclaimer-content" class="disclaimer-content">
+      <div class="disclaimer-text">
+        स्टॉक मार्केट में निवेश बाज़ार जोखिमों (Market Risks) के अधीन है।<br><br>
+        किसी भी तरह का निवेश करने से पहले, सभी संबंधित दस्तावेज़ ध्यान से पढ़ें और अपने वित्तीय सलाहकार से सलाह लें।<br><br>
+        पिछले प्रदर्शन का मतलब भविष्य के रिटर्न की गारंटी नहीं है। यह जानकारी केवल शैक्षिक उद्देश्यों के लिए है, न कि वित्तीय सलाह।
+      </div>
+      <div class="disclaimer-buttons">
+        <button id="btn-ack" class="btn-ack">Acknowledge</button>
+        <button id="btn-ignore" class="btn-ignore">IGNORE</button>
+      </div>
+    </div>
+    
+    <div id="meme-reaction" class="meme-reaction" style="display: none;">
+      <h1 id="meme-text"></h1>
+      <div id="meme-gif-container"></div>
+    </div>
+  </div>
 
   <header>
     <div class="brand">
@@ -61,13 +87,15 @@
   <footer>
     For personal use — definitely NOT financial advice. Pls don't sue.
     <div style="margin-top: 12px;">
-      <strong style="font-size: 1.5em; color: #ff9800;">
-        स्टॉक मार्केट में निवेश बाज़ार के जोखिमों के अधीन है।
-        निवेश करने से पहले सभी संबंधित दस्तावेज़ ध्यान से पढ़ें।
+      <strong class="footer-disclaimer">
+        स्टॉक मार्केट में निवेश बाज़ार जोखिमों (Market Risks) के अधीन है।<br>
+        किसी भी तरह का निवेश करने से पहले, सभी संबंधित दस्तावेज़ ध्यान से पढ़ें और अपने वित्तीय सलाहकार से सलाह लें।<br>
+        पिछले प्रदर्शन का मतलब भविष्य के रिटर्न की गारंटी नहीं है। यह जानकारी केवल शैक्षिक उद्देश्यों के लिए है, न कि वित्तीय सलाह।
       </strong>
     </div>
   </footer>
 
+  <script async src="https://tenor.com/embed.js"></script>
   <script src="app-v2.js"></script>
 </body>
 

@@ -1,9 +1,7 @@
 // Detect data base: same-origin localhost uses relative path, prod uses R2 URL
 const IS_PROD = window.location.hostname !== "localhost" &&
                 window.location.hostname !== "127.0.0.1";
-const DATA_BASE = IS_PROD
-  ? "https://data.trader.akshaydhenge.uk"
-  : "/data/web_publish";
+const DATA_BASE = "https://data.trader.akshaydhenge.uk";
 
 const state = {
   lastSeenUtc: null,
@@ -122,7 +120,9 @@ function renderTopPicks() {
   const latest = state.latest;
   if (!latest) { el.innerHTML = '<div class="empty-state">No scan data yet. (Praying for green candles 🙏)</div>'; return; }
 
-  let html = "";
+  let html = `<div style="text-align: center; margin-bottom: 24px;">
+    <img src="bull1.png" alt="Charging Bull" style="max-height: 180px; image-rendering: pixelated; filter: drop-shadow(4px 4px 0px var(--accent-dim));">
+  </div>`;
 
   const deepRows = latest.deep?.top10 ?? [];
   const deepTs   = latest.deep?.scan_timestamp_utc;
@@ -269,7 +269,7 @@ let alertFilter = "all";
 function renderAlerts() {
   const el = document.getElementById("panel-alerts");
   const data = state.alerts;
-  if (!data?.events?.length) { el.innerHTML = '<div class="empty-state">No alerts yet. It\\'s too quiet... suspiciously quiet.</div>'; return; }
+  if (!data?.events?.length) { el.innerHTML = '<div class="empty-state">No alerts yet. It\'s too quiet... suspiciously quiet.</div>'; return; }
 
   const filtered = alertFilter === "all"
     ? data.events
@@ -452,6 +452,84 @@ function scheduleRefresh() {
 }
 
 initTabs();
-refresh().then(scheduleRefresh);
+
+function videoEndedPromise() {
+  return new Promise(r => {
+    const video = document.getElementById("loading-video");
+    if (!video) return r();
+    video.playbackRate = 3;
+    if (video.ended) return r();
+    video.addEventListener("ended", r, { once: true });
+    video.addEventListener("error", r, { once: true });
+    // hard cap: resolve after 4s so fade fits within 5s total
+    setTimeout(r, 4000);
+  });
+}
+
+function dismissLoader() {
+  const loader = document.getElementById("loading-screen");
+  if (loader && !loader.classList.contains("hidden")) {
+    loader.classList.add("hidden");
+    setTimeout(() => {
+      loader.style.display = "none";
+      const discScreen = document.getElementById("disclaimer-screen");
+      if (discScreen) discScreen.style.display = "flex";
+    }, 1000);
+  }
+}
+
+// ── Disclaimer Interaction ──
+function handleDisclaimer(choice) {
+  const discContent = document.getElementById("disclaimer-content");
+  const memeReaction = document.getElementById("meme-reaction");
+  const memeText = document.getElementById("meme-text");
+  const memeGif = document.getElementById("meme-gif-container");
+  const discScreen = document.getElementById("disclaimer-screen");
+
+  discContent.style.display = "none";
+  memeReaction.style.display = "flex";
+  
+  if (choice === "ignore") {
+    memeText.textContent = "Niceee!!";
+    memeText.style.color = "var(--accent)";
+    memeGif.innerHTML = `<div class="tenor-gif-embed" data-postid="3521589" data-share-method="host" data-aspect-ratio="1.31915" data-width="100%"><a href="https://tenor.com/view/jeremiah-johnson-robert-redford-nod-of-approval-yes-you-got-it-gif-3521589">Jeremiah Johnson Robert Redford GIF</a>from <a href="https://tenor.com/search/jeremiah+johnson-gifs">Jeremiah Johnson GIFs</a></div>`;
+  } else {
+    memeText.textContent = "Seriously?? you disappoint me!!";
+    memeText.style.color = "var(--red)";
+    memeGif.innerHTML = `<div class="tenor-gif-embed" data-postid="3084011263963247857" data-share-method="host" data-aspect-ratio="1" data-width="100%"><a href="https://tenor.com/view/disappointed-wriotags-gif-3084011263963247857">Disappointed Wriotags GIF</a>from <a href="https://tenor.com/search/disappointed-gifs">Disappointed GIFs</a></div>`;
+  }
+  
+  // Tenor script trigger
+  const script = document.createElement('script');
+  script.src = "https://tenor.com/embed.js";
+  script.async = true;
+  document.body.appendChild(script);
+
+  // Fade out disclaimer screen after 3.5s
+  setTimeout(() => {
+    discScreen.classList.add("hidden");
+    setTimeout(() => discScreen.style.display = "none", 1000);
+  }, 3500);
+}
+
+document.getElementById("btn-ignore")?.addEventListener("click", () => handleDisclaimer("ignore"));
+document.getElementById("btn-ack")?.addEventListener("click", () => handleDisclaimer("ack"));
+
+// Hard deadline: loader always gone within 5s no matter what
+const loaderDeadline = setTimeout(dismissLoader, 5000);
+
+// Wait for data fetch AND video to finish playing
+Promise.all([
+  refresh(),
+  videoEndedPromise()
+]).then(() => {
+  clearTimeout(loaderDeadline);
+  dismissLoader();
+  scheduleRefresh();
+}).catch(err => {
+  console.error("Boot error:", err);
+  clearTimeout(loaderDeadline);
+  dismissLoader();
+});
 // Badge age ticks every minute regardless of data poll rate
 setInterval(() => updateFreshnessBadge(state.meta?.last_updated_utc ?? null), 60_000);
