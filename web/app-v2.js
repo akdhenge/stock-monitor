@@ -15,6 +15,196 @@ const state = {
   sortState: {},   // { tableId: { col: "total_score", dir: -1 } }
 };
 
+// ── Write API ─────────────────────────────────────────────────────────────
+
+const API_BASE = "https://api.trader.akshaydhenge.uk";
+
+function getApiKey() {
+  return localStorage.getItem("stonks_api_key") || "";
+}
+
+async function sendCmd(payload) {
+  const key = getApiKey();
+  if (!key) throw new Error("API key not set — click ⚙ in the header to configure.");
+  const res = await fetch(`${API_BASE}/api/cmd`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-API-Key": key },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;  // { cmd_id }
+}
+
+async function pollCmdDone(cmdId, maxWaitMs = 120_000) {
+  const key = getApiKey();
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const res = await fetch(`${API_BASE}/api/cmd/${cmdId}`, {
+        headers: { "X-API-Key": key },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.status !== "pending") return data;
+    } catch { /* network blip — keep polling */ }
+  }
+  throw new Error("Timed out waiting for desktop app response (120s). Is the app running?");
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────
+
+let _toastTimer = null;
+function showToast(msg, type = "info") {
+  let el = document.getElementById("cmd-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "cmd-toast";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = `cmd-toast cmd-toast-${type} cmd-toast-visible`;
+  clearTimeout(_toastTimer);
+  if (type !== "info") {
+    _toastTimer = setTimeout(() => el.classList.remove("cmd-toast-visible"), 8000);
+  }
+}
+
+// ── Settings modal ─────────────────────────────────────────────────────────
+
+function openSettings() {
+  document.getElementById("input-api-key").value = getApiKey();
+  document.getElementById("modal-settings").style.display = "flex";
+}
+function closeSettings() {
+  document.getElementById("modal-settings").style.display = "none";
+}
+function saveSettings() {
+  const key = document.getElementById("input-api-key").value.trim();
+  if (key) localStorage.setItem("stonks_api_key", key);
+  else localStorage.removeItem("stonks_api_key");
+  closeSettings();
+  showToast("API key saved.", "ok");
+}
+
+// ── Watchlist modal ────────────────────────────────────────────────────────
+
+let _confirmSymbol = null;
+
+function openAddModal() {
+  document.getElementById("wl-mode").value = "watchlist_add";
+  document.getElementById("modal-wl-title").textContent = "ADD STOCK";
+  document.getElementById("wl-symbol").value = "";
+  document.getElementById("wl-symbol").disabled = false;
+  document.getElementById("wl-low").value = "";
+  document.getElementById("wl-high").value = "";
+  document.getElementById("wl-notes").value = "";
+  document.getElementById("modal-watchlist").style.display = "flex";
+  setTimeout(() => document.getElementById("wl-symbol").focus(), 50);
+}
+function openEditModal(symbol, low, high, notes) {
+  document.getElementById("wl-mode").value = "watchlist_edit";
+  document.getElementById("modal-wl-title").textContent = "EDIT STOCK";
+  document.getElementById("wl-symbol").value = symbol;
+  document.getElementById("wl-symbol").disabled = true;
+  document.getElementById("wl-low").value = low;
+  document.getElementById("wl-high").value = high;
+  document.getElementById("wl-notes").value = notes || "";
+  document.getElementById("modal-watchlist").style.display = "flex";
+  setTimeout(() => document.getElementById("wl-low").focus(), 50);
+}
+function closeWatchlistModal() {
+  document.getElementById("modal-watchlist").style.display = "none";
+}
+async function submitWatchlistForm() {
+  const mode = document.getElementById("wl-mode").value;
+  const symbol = document.getElementById("wl-symbol").value.trim().toUpperCase();
+  const low = parseFloat(document.getElementById("wl-low").value);
+  const high = parseFloat(document.getElementById("wl-high").value);
+  const notes = document.getElementById("wl-notes").value.trim();
+
+  if (!symbol) { showToast("Symbol is required.", "error"); return; }
+  if (isNaN(low) || low <= 0) { showToast("Enter a valid low target price.", "error"); return; }
+  if (isNaN(high) || high <= 0) { showToast("Enter a valid high target price.", "error"); return; }
+
+  closeWatchlistModal();
+  showToast("Sending command…", "info");
+  try {
+    const { cmd_id } = await sendCmd({ type: mode, symbol, low, high, notes });
+    showToast("Waiting for desktop app…", "info");
+    const result = await pollCmdDone(cmd_id);
+    if (result.status === "ok") {
+      showToast(result.message, "ok");
+      setTimeout(refresh, 2000);
+    } else {
+      showToast(`Error: ${result.message}`, "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function openConfirmRemove(symbol) {
+  _confirmSymbol = symbol;
+  document.getElementById("confirm-text").textContent = `Remove ${symbol} from watchlist?`;
+  document.getElementById("modal-confirm").style.display = "flex";
+}
+function closeConfirm() {
+  document.getElementById("modal-confirm").style.display = "none";
+  _confirmSymbol = null;
+}
+async function confirmRemoveYes() {
+  const symbol = _confirmSymbol;
+  closeConfirm();
+  if (!symbol) return;
+  showToast(`Removing ${symbol}…`, "info");
+  try {
+    const { cmd_id } = await sendCmd({ type: "watchlist_remove", symbol });
+    showToast("Waiting for desktop app…", "info");
+    const result = await pollCmdDone(cmd_id);
+    if (result.status === "ok") {
+      showToast(result.message, "ok");
+      setTimeout(refresh, 2000);
+    } else {
+      showToast(`Error: ${result.message}`, "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+// ── Scan triggers ──────────────────────────────────────────────────────────
+
+async function runDeepScan() {
+  showToast("Requesting deep scan…", "info");
+  try {
+    await sendCmd({ type: "deep_scan" });
+    showToast("Deep scan started — results will appear after the scan completes (a few minutes).", "ok");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function runAiScan() {
+  const symbol = (document.getElementById("aiscan-symbol")?.value || "").trim().toUpperCase();
+  if (!symbol) { showToast("Enter a symbol first.", "error"); return; }
+  showToast(`Requesting AI scan for ${symbol}…`, "info");
+  try {
+    const { cmd_id } = await sendCmd({ type: "aiscan", symbol });
+    showToast(`AI scan queued for ${symbol} — waiting for result…`, "info");
+    const result = await pollCmdDone(cmd_id, 120_000);
+    if (result.status === "ok") {
+      showToast(`AI scan complete for ${symbol}!`, "ok");
+      setTimeout(refresh, 1500);
+    } else {
+      showToast(`AI scan error: ${result.message}`, "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
 // ── Fetch helpers ──────────────────────────────────────────────────────────
 
 async function fetchJSON(url) {
@@ -115,6 +305,10 @@ function renderAll() {
 
 // ── Top Picks ──────────────────────────────────────────────────────────────
 
+function escHtml(str) {
+  return String(str ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
 function renderTopPicks() {
   const el = document.getElementById("panel-top-picks");
   const latest = state.latest;
@@ -131,6 +325,10 @@ function renderTopPicks() {
   const completeRows = latest.complete?.top5 ?? [];
   const completeTs   = latest.complete?.scan_timestamp_utc;
   html += renderScanTable("Complete Scan — Top 5", completeRows, completeTs, 5, "tbl-complete");
+
+  html += `<div style="text-align:center;padding:16px 0 8px">
+    <button class="action-btn" onclick="runDeepScan()">▶ Run Deep Scan</button>
+  </div>`;
 
   el.innerHTML = html || '<div class="empty-state">No scan results available. (Praying for green candles 🙏)</div>';
 }
@@ -234,11 +432,20 @@ function toggleSort(tableId, col) {
 function renderWatchlist() {
   const el = document.getElementById("panel-watchlist");
   const data = state.watchlist;
-  if (!data?.entries?.length) { el.innerHTML = '<div class="empty-state">Watchlist is empty. Have you tried buying the dip?</div>'; return; }
 
-  let html = `<div class="card"><div class="card-title">Watchlist — ${fmtUTC(data.updated_utc)}</div>
-  <table><thead><tr>
-    <th>Symbol</th><th>Last Price</th><th>Low Target</th><th>High Target</th><th>Status</th><th>Notes</th>
+  let html = `<div style="padding:8px 0 12px">
+    <button class="action-btn" onclick="openAddModal()">+ Add Stock</button>
+  </div>`;
+
+  if (!data?.entries?.length) {
+    html += '<div class="empty-state">Watchlist is empty. Have you tried buying the dip?</div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  html += `<div class="card"><div class="card-title">Watchlist — ${fmtUTC(data.updated_utc)}</div>
+  <div style="overflow-x:auto"><table><thead><tr>
+    <th>Symbol</th><th>Last Price</th><th>Low Target</th><th>High Target</th><th>Status</th><th>Notes</th><th></th>
   </tr></thead><tbody>`;
 
   data.entries.forEach(e => {
@@ -248,16 +455,22 @@ function renderWatchlist() {
     else if (e.target_hit_state === "low_hit") chipHtml = '<span class="chip chip-red">Below Low</span>';
     else chipHtml = '<span class="chip chip-gray">OK</span>';
 
+    const sym = escHtml(e.symbol);
+    const notes = escHtml(e.notes || "");
     html += `<tr>
-      <td><b>${e.symbol}</b></td>
+      <td><b>${sym}</b></td>
       <td>${price}</td>
       <td>$${e.low.toFixed(2)}</td>
       <td>$${e.high.toFixed(2)}</td>
       <td>${chipHtml}</td>
-      <td style="color:var(--muted);font-size:12px">${e.notes || ""}</td>
+      <td style="color:var(--muted);font-size:12px">${notes}</td>
+      <td class="tbl-actions">
+        <button class="tbl-btn" title="Edit" onclick="openEditModal('${sym}',${e.low},${e.high},'${notes.replace(/'/g,"\\'")}')">✏</button>
+        <button class="tbl-btn tbl-btn-danger" title="Remove" onclick="openConfirmRemove('${sym}')">✕</button>
+      </td>
     </tr>`;
   });
-  html += `</tbody></table></div>`;
+  html += `</tbody></table></div></div>`;
   el.innerHTML = html;
 }
 
@@ -311,10 +524,19 @@ function setAlertFilter(f) {
 function renderAIResearch() {
   const el = document.getElementById("panel-ai");
   const idx = state.aiIndex;
-  if (!idx?.entries?.length) { el.innerHTML = '<div class="empty-state">No AI research cached yet.</div>'; return; }
+
+  let html = `<div class="card" style="padding:12px 16px">
+    <div class="card-title">RUN AI SCAN</div>
+    <div style="display:flex;gap:8px;align-items:center;padding:12px 0 4px;flex-wrap:wrap">
+      <input id="aiscan-symbol" class="modal-input" style="width:140px;text-transform:uppercase" placeholder="Symbol e.g. NVDA">
+      <button class="action-btn" onclick="runAiScan()">▶ Run AI Scan</button>
+    </div>
+  </div>`;
+
+  if (!idx?.entries?.length) { el.innerHTML = html + '<div class="empty-state">No AI research cached yet.</div>'; return; }
 
   const entries = [...idx.entries].sort((a, b) => (b.generated_utc ?? "").localeCompare(a.generated_utc ?? ""));
-  let html = `<div class="card"><div class="card-title">${entries.length} AI Reports Cached</div>`;
+  html += `<div class="card"><div class="card-title">${entries.length} AI Reports Cached</div>`;
   entries.forEach(e => {
     const sentimentClass = e.sentiment === "BULLISH" ? "chip-green" : e.sentiment === "BEARISH" ? "chip-red" : "chip-amber";
     html += `<div class="ai-entry" id="ai-${e.symbol}">

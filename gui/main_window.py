@@ -22,6 +22,7 @@ from core.settings_store import load_settings
 from core.stock_scanner import StockScanner
 from core.ticker_lookup import TickerLookupWorker
 from core.watchlist_store import get_watchlist_store, load_watchlist, save_watchlist
+from core.web_command_poller import WebCommandPoller
 from core.web_publisher import WebPublisher
 from gui.add_edit_dialog import AddEditDialog
 from gui.ai_research_dialog import AIResearchDialog
@@ -69,6 +70,10 @@ class MainWindow(QMainWindow):
         # Alert records for web publishing (mirrored from alert manager callbacks)
         self._alert_records: List[AlertRecord] = []
 
+        # Web command poller — tracks pending web-initiated aiscan by symbol
+        self._web_cmd_poller: Optional[WebCommandPoller] = None
+        self._pending_webcmd_ai: Dict[str, str] = {}  # symbol -> cmd_id
+
         # Web publisher
         self._web_publisher = WebPublisher(
             get_settings=lambda: self._settings,
@@ -77,6 +82,13 @@ class MainWindow(QMainWindow):
         self._web_publisher.publish_succeeded.connect(self._on_publish_succeeded)
         self._web_publisher.publish_failed.connect(self._on_publish_failed)
         self._web_publisher.start()
+
+        if self._settings.get("web_command_polling_enabled"):
+            self._web_cmd_poller = WebCommandPoller(
+                get_settings=lambda: self._settings, parent=self
+            )
+            self._web_cmd_poller.cmd_received.connect(self._on_webcmd)
+            self._web_cmd_poller.start()
 
         # AI Research dialogs — hold references so they are not garbage-collected
         self._ai_dialogs: List[AIResearchDialog] = []
@@ -762,6 +774,66 @@ class MainWindow(QMainWindow):
         self._scanner_panel.set_ai_rank_status(f"AI Ranking complete ✓  ({n} stocks ranked)", "")
         QTimer.singleShot(5000, lambda: self._scanner_panel.set_ai_rank_status("", visible=False))
 
+    # ── Web Command slots ─────────────────────────────────────────────────────
+
+    def _on_webcmd(self, cmd: dict) -> None:
+        """Dispatch a web-initiated command and write a done marker when finished."""
+        cmd_type = cmd.get("type", "")
+        cmd_id = cmd.get("cmd_id", "unknown")
+
+        if cmd_type in ("watchlist_add", "watchlist_edit"):
+            symbol = cmd.get("symbol", "").upper()
+            low = float(cmd.get("low", 0))
+            high = float(cmd.get("high", 0))
+            notes = cmd.get("notes", "")
+            if not symbol or low <= 0 or high <= 0:
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "error", "Missing or invalid symbol/low/high")
+                return
+            self._on_cmd_add(symbol, low, high, notes, reply_chat_id="")
+            self._web_publisher.request_publish("watchlist_changed")
+            if self._web_cmd_poller:
+                action = "Updated" if cmd_type == "watchlist_edit" else "Added"
+                self._web_cmd_poller.write_done(cmd_id, "ok", f"{action} {symbol} — Low: ${low}, High: ${high}")
+
+        elif cmd_type == "watchlist_remove":
+            symbol = cmd.get("symbol", "").upper()
+            if not symbol:
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "error", "Missing symbol")
+                return
+            before = len(self._watchlist)
+            self._on_cmd_remove(symbol, reply_chat_id="")
+            if self._web_cmd_poller:
+                if len(self._watchlist) < before:
+                    self._web_publisher.request_publish("watchlist_changed")
+                    self._web_cmd_poller.write_done(cmd_id, "ok", f"Removed {symbol}")
+                else:
+                    self._web_cmd_poller.write_done(cmd_id, "error", f"{symbol} not found in watchlist")
+
+        elif cmd_type == "aiscan":
+            symbol = cmd.get("symbol", "").upper()
+            if not symbol:
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "error", "Missing symbol")
+                return
+            self._pending_webcmd_ai[symbol] = cmd_id
+            self._on_cmd_aiscan(symbol, reply_chat_id="")
+
+        elif cmd_type == "deep_scan":
+            if self._scanner is not None and self._scanner.isRunning():
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "ok", "scan_already_running")
+                return
+            if self._web_cmd_poller:
+                self._web_cmd_poller.write_done(cmd_id, "ok", "scan_started")
+            self._trigger_deep_scan()
+
+        else:
+            _log.warning("WebCommandPoller: unknown command type: %s", cmd_type)
+            if self._web_cmd_poller:
+                self._web_cmd_poller.write_done(cmd_id, "error", f"Unknown command type: {cmd_type}")
+
     # ── Bot Command slots ─────────────────────────────────────────────────────
 
     def _on_cmd_add(
@@ -921,6 +993,13 @@ class MainWindow(QMainWindow):
             token, reply_chat_id,
             "💬 <i>You can now ask follow-up questions about this stock for the next 30 minutes. Use /stopaiscan to stop</i>"
         )
+        # Write done marker if this was triggered via web command
+        symbol = result.get("symbol", "")
+        if symbol and symbol in self._pending_webcmd_ai:
+            cmd_id = self._pending_webcmd_ai.pop(symbol)
+            if self._web_cmd_poller:
+                self._web_cmd_poller.write_done(cmd_id, "ok", f"AI research complete for {symbol}")
+            self._web_publisher.request_publish("watchlist_changed")
 
     def _send_aiscan_telegram(self, result: dict, reply_chat_id: str) -> None:
         token = self._settings.get("telegram_token", "")
@@ -1261,6 +1340,9 @@ class MainWindow(QMainWindow):
                 r.stop()
                 r.wait(2000)
         self._ai_rank_researchers.clear()
+        if self._web_cmd_poller is not None and self._web_cmd_poller.isRunning():
+            self._web_cmd_poller.stop()
+            self._web_cmd_poller.wait(3000)
         if self._web_publisher.isRunning():
             self._web_publisher.stop()
             self._web_publisher.wait(3000)

@@ -40,6 +40,7 @@ _DEFAULTS: Dict[str, Any] = {
     "congressional_tracked_politicians": "Nancy Pelosi,Tommy Tuberville,Josh Gottheimer,Michael McCaul,John Hickenlooper,Tom Cotton",
     # Web publishing
     "web_publishing_enabled": False,
+    "web_command_polling_enabled": False,
     "web_publish_interval_minutes": 15,
     "web_public_url": "https://trader.akshaydhenge.uk",
     "r2_account_id": "",

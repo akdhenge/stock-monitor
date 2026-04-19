@@ -45,7 +45,58 @@
       <span class="brand-sub">trader.akshaydhenge.uk</span>
     </div>
     <span id="freshness-badge" class="freshness-badge unknown">Summoning market spirits…</span>
+    <button class="gear-btn" title="API Settings" onclick="openSettings()">⚙</button>
   </header>
+
+  <!-- Settings modal -->
+  <div id="modal-settings" class="modal" style="display:none" onclick="if(event.target===this)closeSettings()">
+    <div class="modal-box">
+      <div class="modal-title">API SETTINGS</div>
+      <label class="modal-label">API Key
+        <input type="password" id="input-api-key" class="modal-input" placeholder="Paste your API key here">
+      </label>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-primary" onclick="saveSettings()">Save</button>
+        <button class="modal-btn" onclick="closeSettings()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Watchlist add/edit modal -->
+  <div id="modal-watchlist" class="modal" style="display:none" onclick="if(event.target===this)closeWatchlistModal()">
+    <div class="modal-box">
+      <div class="modal-title" id="modal-wl-title">ADD STOCK</div>
+      <input type="hidden" id="wl-mode" value="watchlist_add">
+      <label class="modal-label">Symbol
+        <input id="wl-symbol" class="modal-input" placeholder="e.g. AAPL" autocapitalize="characters">
+      </label>
+      <label class="modal-label">Low Target ($)
+        <input id="wl-low" type="number" step="0.01" min="0.01" class="modal-input" placeholder="e.g. 170.00">
+      </label>
+      <label class="modal-label">High Target ($)
+        <input id="wl-high" type="number" step="0.01" min="0.01" class="modal-input" placeholder="e.g. 210.00">
+      </label>
+      <label class="modal-label">Notes (optional)
+        <input id="wl-notes" class="modal-input" placeholder="e.g. accumulate below 175">
+      </label>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-primary" onclick="submitWatchlistForm()">Save</button>
+        <button class="modal-btn" onclick="closeWatchlistModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm remove modal -->
+  <div id="modal-confirm" class="modal" style="display:none" onclick="if(event.target===this)closeConfirm()">
+    <div class="modal-box">
+      <div class="modal-title">CONFIRM REMOVE</div>
+      <p class="modal-confirm-text" id="confirm-text">Remove this stock from watchlist?</p>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-danger" id="btn-confirm-yes" onclick="confirmRemoveYes()">Remove</button>
+        <button class="modal-btn" onclick="closeConfirm()">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <div id="stale-banner" class="stale-banner" style="display:none"></div>
 

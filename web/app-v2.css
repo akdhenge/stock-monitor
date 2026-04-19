@@ -618,6 +618,137 @@ footer {
   margin-top: 16px;
 }
 
+/* ── Write UI — gear, modals, toast, buttons ── */
+
+.gear-btn {
+  margin-left: auto;
+  background: none;
+  border: 2px solid var(--border-2);
+  color: var(--muted);
+  font-size: 18px;
+  width: 36px;
+  height: 36px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.gear-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.action-btn {
+  font-family: var(--font-brand);
+  font-size: 10px;
+  padding: 10px 18px;
+  background: var(--bg);
+  color: var(--accent);
+  border: 2px solid var(--accent);
+  cursor: pointer;
+  box-shadow: 4px 4px 0px var(--accent-dim);
+  white-space: nowrap;
+}
+.action-btn:hover { background: var(--accent); color: var(--bg); }
+.action-btn:active { transform: translate(2px,2px); box-shadow: none; }
+
+.tbl-actions { white-space: nowrap; }
+.tbl-btn {
+  background: none;
+  border: 1px solid var(--border-2);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px 7px;
+  font-size: 13px;
+  margin-right: 2px;
+}
+.tbl-btn:hover { border-color: var(--accent); color: var(--accent); }
+.tbl-btn-danger:hover { border-color: var(--red); color: var(--red); }
+
+/* Modal overlay */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-box {
+  background: var(--bg);
+  border: 4px solid var(--accent);
+  box-shadow: 8px 8px 0px var(--accent-dim);
+  padding: 32px;
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.modal-title {
+  font-family: var(--font-brand);
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+.modal-label {
+  font-family: var(--font-data);
+  font-size: 17px;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.modal-input {
+  font-family: var(--font-data);
+  font-size: 18px;
+  background: var(--surface-2);
+  border: 2px solid var(--border-2);
+  color: var(--text);
+  padding: 8px 12px;
+  width: 100%;
+}
+.modal-input:focus { outline: none; border-color: var(--accent); }
+.modal-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.modal-btn {
+  font-family: var(--font-brand);
+  font-size: 10px;
+  padding: 10px 16px;
+  background: var(--bg);
+  color: var(--muted);
+  border: 2px solid var(--border-2);
+  cursor: pointer;
+}
+.modal-btn:hover { color: var(--text); border-color: var(--text); }
+.modal-btn-primary { color: var(--accent); border-color: var(--accent); box-shadow: 3px 3px 0px var(--accent-dim); }
+.modal-btn-primary:hover { background: var(--accent); color: var(--bg); }
+.modal-btn-danger { color: var(--red); border-color: var(--red); }
+.modal-btn-danger:hover { background: var(--red); color: #fff; }
+.modal-confirm-text { font-family: var(--font-data); font-size: 20px; color: var(--text-dim); }
+
+/* Toast */
+#cmd-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 20000;
+  font-family: var(--font-data);
+  font-size: 18px;
+  padding: 12px 20px;
+  border: 2px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text);
+  max-width: 380px;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.2s, transform 0.2s;
+  pointer-events: none;
+}
+#cmd-toast.cmd-toast-visible { opacity: 1; transform: translateY(0); }
+#cmd-toast.cmd-toast-ok { border-color: var(--accent); color: var(--accent); }
+#cmd-toast.cmd-toast-error { border-color: var(--red); color: var(--red); }
+#cmd-toast.cmd-toast-info { border-color: var(--amber); color: var(--amber); }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
 ::-webkit-scrollbar-track { background: #000; border-left: 2px solid var(--border-2); }
