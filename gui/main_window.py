@@ -245,6 +245,16 @@ class MainWindow(QMainWindow):
             self._poller.wait()
         self._start_poller()
 
+    def _restart_web_cmd_poller(self) -> None:
+        if self._web_cmd_poller is not None and self._web_cmd_poller.isRunning():
+            self._web_cmd_poller.stop()
+            self._web_cmd_poller.wait(3000)
+            self._web_cmd_poller = None
+        if self._settings.get("web_command_polling_enabled"):
+            self._web_cmd_poller = WebCommandPoller(get_settings=lambda: self._settings, parent=self)
+            self._web_cmd_poller.cmd_received.connect(self._on_webcmd)
+            self._web_cmd_poller.start()
+
     # ── Command Poller ────────────────────────────────────────────────────────
 
     def _start_command_poller(self) -> None:
@@ -1235,6 +1245,7 @@ class MainWindow(QMainWindow):
             self._settings = dlg.get_settings()
             self._apply_settings(self._settings)
             self._restart_poller()
+            self._restart_web_cmd_poller()
 
     # ── Publish badge ─────────────────────────────────────────────────────────
 

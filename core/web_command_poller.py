@@ -56,6 +56,7 @@ class WebCommandPoller(QThread):
 
     def run(self) -> None:
         self._running = True
+        _log.info("WebCommandPoller: started")
         while self._running:
             try:
                 self._poll_once()
@@ -76,6 +77,7 @@ class WebCommandPoller(QThread):
         endpoint   = settings.get("r2_endpoint_url", "").strip()
 
         if not all([account_id, access_key, secret_key]):
+            _log.warning("WebCommandPoller: R2 credentials not configured — skipping poll")
             return None
 
         if not endpoint:
@@ -102,6 +104,7 @@ class WebCommandPoller(QThread):
         s3 = self._make_r2_client()
         if s3 is None:
             return
+        _log.info("WebCommandPoller: polling R2 for pending commands…")
 
         settings = self._get_settings()
         bucket = settings.get("r2_bucket", "trader-data")

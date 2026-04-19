@@ -381,6 +381,10 @@ class SettingsDialog(QDialog):
         self._web_enabled.setChecked(self._settings.get("web_publishing_enabled", False))
         layout.addWidget(self._web_enabled)
 
+        self._web_cmd_polling_enabled = QCheckBox("Enable web command polling (write from browser)")
+        self._web_cmd_polling_enabled.setChecked(self._settings.get("web_command_polling_enabled", False))
+        layout.addWidget(self._web_cmd_polling_enabled)
+
         form = QFormLayout()
         layout.addLayout(form)
 
@@ -499,6 +503,7 @@ class SettingsDialog(QDialog):
                 if line.strip()
             ),
             "web_publishing_enabled": self._web_enabled.isChecked(),
+            "web_command_polling_enabled": self._web_cmd_polling_enabled.isChecked(),
             "web_publish_interval_minutes": self._web_interval_spin.value(),
             "r2_account_id": self._r2_account_id.text().strip(),
             "r2_access_key_id": self._r2_access_key.text().strip(),
