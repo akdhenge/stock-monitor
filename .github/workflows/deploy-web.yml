@@ -1,0 +1,19 @@
+name: Deploy Web to Cloudflare Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'web/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: pages deploy web/ --project-name trader-frontend
