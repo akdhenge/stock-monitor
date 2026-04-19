@@ -314,9 +314,7 @@ function renderTopPicks() {
   const latest = state.latest;
   if (!latest) { el.innerHTML = '<div class="empty-state">No scan data yet. (Praying for green candles 🙏)</div>'; return; }
 
-  let html = `<div style="text-align: center; margin-bottom: 24px;">
-    <img src="bull1.png" alt="Charging Bull" style="max-height: 180px; image-rendering: pixelated; filter: drop-shadow(4px 4px 0px var(--accent-dim));">
-  </div>`;
+  let html = ``;
 
   const deepRows = latest.deep?.top10 ?? [];
   const deepTs   = latest.deep?.scan_timestamp_utc;
