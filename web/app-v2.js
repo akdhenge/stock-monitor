@@ -285,10 +285,13 @@ function updateFreshnessBadge(utcStr) {
 function initTabs() {
   document.querySelectorAll(".tab-bar button").forEach(btn => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-bar button").forEach(b => b.setAttribute("aria-selected", "false"));
-      document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
-      btn.setAttribute("aria-selected", "true");
-      document.getElementById(btn.dataset.panel).classList.add("active");
+      if (btn.getAttribute("aria-selected") === "true") return;
+      playTransition(() => {
+        document.querySelectorAll(".tab-bar button").forEach(b => b.setAttribute("aria-selected", "false"));
+        document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+        btn.setAttribute("aria-selected", "true");
+        document.getElementById(btn.dataset.panel).classList.add("active");
+      });
     });
   });
 }
@@ -673,29 +676,42 @@ function scheduleRefresh() {
 
 initTabs();
 
-function videoEndedPromise() {
-  return new Promise(r => {
-    const video = document.getElementById("loading-video");
-    if (!video) return r();
-    video.playbackRate = 3;
-    if (video.ended) return r();
-    video.addEventListener("ended", r, { once: true });
-    video.addEventListener("error", r, { once: true });
-    // hard cap: resolve after 4s so fade fits within 5s total
-    setTimeout(r, 4000);
-  });
+// ── Boot Sequence ──
+
+function playTransition(callback) {
+  const loader = document.getElementById("loading-screen");
+  const video = document.getElementById("loading-video");
+  
+  if (loader && video) {
+    loader.style.display = "flex";
+    // force reflow
+    void loader.offsetWidth;
+    loader.classList.remove("hidden");
+    
+    video.playbackRate = 5.0;
+    video.currentTime = 0;
+    video.play().catch(e => console.warn("Video autoplay blocked:", e));
+
+    setTimeout(() => {
+      if (callback) callback();
+      loader.classList.add("hidden");
+      setTimeout(() => {
+        loader.style.display = "none";
+      }, 200);
+    }, 900);
+  } else {
+    if (callback) callback();
+  }
 }
 
-function dismissLoader() {
-  const loader = document.getElementById("loading-screen");
-  if (loader && !loader.classList.contains("hidden")) {
-    loader.classList.add("hidden");
-    setTimeout(() => {
-      loader.style.display = "none";
-      const discScreen = document.getElementById("disclaimer-screen");
-      if (discScreen) discScreen.style.display = "flex";
-    }, 1000);
+function showLoadingTransition() {
+  const discScreen = document.getElementById("disclaimer-screen");
+  if (discScreen) {
+    discScreen.style.display = "none";
   }
+  playTransition(() => {
+    scheduleRefresh();
+  });
 }
 
 // ── Disclaimer Interaction ──
@@ -704,7 +720,12 @@ function handleDisclaimer(choice) {
   const memeReaction = document.getElementById("meme-reaction");
   const memeText = document.getElementById("meme-text");
   const memeGif = document.getElementById("meme-gif-container");
-  const discScreen = document.getElementById("disclaimer-screen");
+
+  // If closed directly, skip meme and go to transition
+  if (choice === "close") {
+    showLoadingTransition();
+    return;
+  }
 
   discContent.style.display = "none";
   memeReaction.style.display = "flex";
@@ -725,31 +746,19 @@ function handleDisclaimer(choice) {
   script.async = true;
   document.body.appendChild(script);
 
-  // Fade out disclaimer screen after 3.5s
+  // Wait 3.5s then show loading transition
   setTimeout(() => {
-    discScreen.classList.add("hidden");
-    setTimeout(() => discScreen.style.display = "none", 1000);
+    showLoadingTransition();
   }, 3500);
 }
 
 document.getElementById("btn-ignore")?.addEventListener("click", () => handleDisclaimer("ignore"));
 document.getElementById("btn-ack")?.addEventListener("click", () => handleDisclaimer("ack"));
+document.getElementById("btn-close-disc")?.addEventListener("click", () => handleDisclaimer("close"));
 
-// Hard deadline: loader always gone within 5s no matter what
-const loaderDeadline = setTimeout(dismissLoader, 5000);
+// Boot: Fetch data immediately, but do NOT show loader or dashboard. 
+// Disclaimer screen is already visible via HTML.
+refresh().catch(err => console.error("Boot error:", err));
 
-// Wait for data fetch AND video to finish playing
-Promise.all([
-  refresh(),
-  videoEndedPromise()
-]).then(() => {
-  clearTimeout(loaderDeadline);
-  dismissLoader();
-  scheduleRefresh();
-}).catch(err => {
-  console.error("Boot error:", err);
-  clearTimeout(loaderDeadline);
-  dismissLoader();
-});
 // Badge age ticks every minute regardless of data poll rate
 setInterval(() => updateFreshnessBadge(state.meta?.last_updated_utc ?? null), 60_000);

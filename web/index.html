@@ -13,15 +13,16 @@
 </head>
 
 <body>
-  <div id="loading-screen" class="loading-screen">
-    <video autoplay muted playsinline class="loading-video" id="loading-video">
+  <div id="loading-screen" class="loading-screen" style="display: none;">
+    <video muted playsinline class="loading-video" id="loading-video">
       <source src="Retro_Pixel_Art_Animation_Gen.mp4" type="video/mp4">
     </video>
     <div class="loading-text">DIAMOND HANDS ACTIVATED... 🚀</div>
   </div>
 
-  <div id="disclaimer-screen" class="disclaimer-screen" style="display: none;">
+  <div id="disclaimer-screen" class="disclaimer-screen">
     <div id="disclaimer-content" class="disclaimer-content">
+      <button id="btn-close-disc" class="btn-close-disc">X</button>
       <div class="disclaimer-text">
         स्टॉक मार्केट में निवेश बाज़ार जोखिमों (Market Risks) के अधीन है।<br><br>
         किसी भी तरह का निवेश करने से पहले, सभी संबंधित दस्तावेज़ ध्यान से पढ़ें और अपने वित्तीय सलाहकार से सलाह लें।<br><br>
