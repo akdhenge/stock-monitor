@@ -749,6 +749,77 @@ td:nth-child(2) b {
 }
 
 /* ── Footer ── */
+/* ── Claude Ranking panel ── */
+
+.ranking-card {
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  margin: 16px;
+  padding: 16px;
+}
+
+.ranking-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.ranking-title {
+  font-family: var(--font-brand);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.ranking-meta {
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.ranking-tbl td,
+.ranking-tbl th {
+  max-width: 280px;
+  white-space: normal;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.risk-badge {
+  font-size: 13px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+}
+
+.risk-low  { color: var(--green); }
+.risk-med  { color: var(--amber); }
+.risk-high { color: var(--red); }
+
+.ranking-notes {
+  margin: 14px 0;
+  padding: 10px;
+  border-left: 3px solid var(--accent-dim);
+  color: var(--text-dim);
+  font-size: 16px;
+  white-space: pre-line;
+}
+
+.ranking-gem {
+  color: var(--amber);
+  font-size: 16px;
+  margin: 8px 0;
+}
+
+.ranking-footer {
+  color: var(--muted);
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.ranking-actions {
+  margin: 12px 16px;
+}
+
 footer {
   position: relative;
   z-index: 1;

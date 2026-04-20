@@ -22,10 +22,12 @@ from core.settings_store import load_settings
 from core.stock_scanner import StockScanner
 from core.ticker_lookup import TickerLookupWorker
 from core.watchlist_store import get_watchlist_store, load_watchlist, save_watchlist
+from core.claude_ranking_analyst import ClaudeRankingAnalyst
 from core.web_command_poller import WebCommandPoller
 from core.web_publisher import WebPublisher
 from gui.add_edit_dialog import AddEditDialog
 from gui.ai_research_dialog import AIResearchDialog
+from gui.claude_ranking_dialog import ClaudeRankingDialog
 from gui.alert_history_panel import AlertHistoryPanel
 from gui.log_panel import LogPanel, setup_log_handler
 from gui.settings_dialog import SettingsDialog
@@ -73,6 +75,10 @@ class MainWindow(QMainWindow):
         # Web command poller — tracks pending web-initiated aiscan by symbol
         self._web_cmd_poller: Optional[WebCommandPoller] = None
         self._pending_webcmd_ai: Dict[str, str] = {}  # symbol -> cmd_id
+
+        # Claude ranking analyst
+        self._ranking_analyst: Optional[ClaudeRankingAnalyst] = None
+        self._pending_webcmd_ranking: Optional[str] = None  # cmd_id from web trigger
 
         # Web publisher
         self._web_publisher = WebPublisher(
@@ -163,6 +169,12 @@ class MainWindow(QMainWindow):
         publish_btn.setToolTip("Publish current data to web snapshot")
         publish_btn.clicked.connect(lambda: self._web_publisher.request_publish("manual"))
         toolbar.addWidget(publish_btn)
+
+        toolbar.addSeparator()
+        ranking_btn = QPushButton("Claude Ranking")
+        ranking_btn.setToolTip("Run Claude AI portfolio ranking on top-10 scan results")
+        ranking_btn.clicked.connect(self._run_claude_ranking)
+        toolbar.addWidget(ranking_btn)
 
         # Tab layout
         central = QWidget()
@@ -839,10 +851,60 @@ class MainWindow(QMainWindow):
                 self._web_cmd_poller.write_done(cmd_id, "ok", "scan_started")
             self._trigger_deep_scan()
 
+        elif cmd_type == "claude_ranking":
+            if self._ranking_analyst and self._ranking_analyst.isRunning():
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "ok", "ranking_already_running")
+                return
+            self._pending_webcmd_ranking = cmd_id
+            self._run_claude_ranking(trigger="web")
+
         else:
             _log.warning("WebCommandPoller: unknown command type: %s", cmd_type)
             if self._web_cmd_poller:
                 self._web_cmd_poller.write_done(cmd_id, "error", f"Unknown command type: {cmd_type}")
+
+    # ── Claude Ranking ────────────────────────────────────────────────────────
+
+    def _run_claude_ranking(self, trigger: str = "desktop") -> None:
+        top10 = self._ai_rank_top10
+        if not top10:
+            QMessageBox.warning(self, "No Data", "No scan results available. Run a deep or complete scan first.")
+            return
+        if self._ranking_analyst is not None and self._ranking_analyst.isRunning():
+            QMessageBox.information(self, "In Progress", "Claude ranking is already running.")
+            return
+        self._ranking_analyst = ClaudeRankingAnalyst(
+            top10, get_settings=lambda: self._settings, trigger=trigger, parent=self
+        )
+        self._ranking_analyst.ranking_complete.connect(self._on_ranking_complete)
+        self._ranking_analyst.ranking_error.connect(self._on_ranking_error)
+        self._ranking_analyst.ranking_status.connect(
+            lambda msg: self._scan_status_label.setText(f"Claude Ranking: {msg}")
+        )
+        self._ranking_analyst.start()
+        self._scan_status_label.setText("Claude ranking started…")
+
+    def _on_ranking_complete(self, result: dict) -> None:
+        self._scan_status_label.setText(
+            f"Claude ranking complete — ${result.get('cost_usd', 0):.4f} "
+            f"({result.get('input_tokens', 0):,}+{result.get('output_tokens', 0):,} tokens)"
+        )
+        if self._pending_webcmd_ranking and self._web_cmd_poller:
+            self._web_cmd_poller.write_done(
+                self._pending_webcmd_ranking, "ok",
+                "Ranking published to ranking.json"
+            )
+            self._pending_webcmd_ranking = None
+        dlg = ClaudeRankingDialog(result, parent=self)
+        dlg.show()
+
+    def _on_ranking_error(self, err: str) -> None:
+        self._scan_status_label.setText(f"Claude ranking error: {err}")
+        if self._pending_webcmd_ranking and self._web_cmd_poller:
+            self._web_cmd_poller.write_done(self._pending_webcmd_ranking, "error", err)
+            self._pending_webcmd_ranking = None
+        QMessageBox.warning(self, "Claude Ranking Error", err)
 
     # ── Bot Command slots ─────────────────────────────────────────────────────
 

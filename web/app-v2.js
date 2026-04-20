@@ -205,6 +205,93 @@ async function runAiScan() {
   }
 }
 
+// ── Claude Ranking ─────────────────────────────────────────────────────────
+
+async function runClaudeRanking() {
+  const passkey = prompt("Enter passkey to run Claude Portfolio Ranking:");
+  if (passkey === null) return;
+  if (!passkey.trim()) { showToast("Passkey required.", "error"); return; }
+  showToast("Queuing Claude ranking… (takes 60–120s)", "info");
+  try {
+    const { cmd_id } = await sendCmd({ type: "claude_ranking", passkey: passkey.trim() });
+    showToast("Waiting for desktop app to run Claude ranking…", "info");
+    const result = await pollCmdDone(cmd_id, 180_000);
+    if (result.status === "ok") {
+      showToast("Claude ranking complete! Loading results…", "ok");
+      await loadRanking();
+    } else {
+      showToast(`Ranking error: ${result.message}`, "error");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function loadRanking() {
+  try {
+    const data = await fetchJSON(`${DATA_BASE}/ranking.json`);
+    renderRanking(data);
+    const tab = document.querySelector('[data-panel="panel-ranking"]');
+    if (tab) tab.click();
+  } catch (err) {
+    showToast("Could not load ranking data: " + err.message, "error");
+  }
+}
+
+function renderRanking(data) {
+  const panel = document.getElementById("panel-ranking");
+  if (!panel) return;
+
+  const ranked = data.ranked || [];
+  const ts = data.generated_at || "";
+  const model = data.model || "";
+  const cost = (data.cost_usd || 0).toFixed(4);
+  const inputT = (data.input_tokens || 0).toLocaleString();
+  const outputT = (data.output_tokens || 0).toLocaleString();
+
+  const rankColors = { 1: "#FFD700", 2: "#C0C0C0", 3: "#CD7F32" };
+  const riskClass  = { Low: "risk-low", Medium: "risk-med", High: "risk-high" };
+
+  let rows = ranked.map(e => {
+    const bg = rankColors[e.rank] ? `style="background:${rankColors[e.rank]};color:#000"` : "";
+    const alloc = e.allocation_pct != null ? `${e.allocation_pct}%` : "—";
+    return `<tr>
+      <td ${bg}><b>${e.rank}</b></td>
+      <td><b>${e.symbol}</b></td>
+      <td><span class="risk-badge ${riskClass[e.risk] || ""}">${e.risk}</span></td>
+      <td>${e.rationale}</td>
+      <td>${e.stock_play}</td>
+      <td>${e.options_play || "—"}</td>
+      <td>${alloc}</td>
+    </tr>`;
+  }).join("");
+
+  const gem = data.hidden_gem ? `<p class="ranking-gem">Hidden Gem: <b>${data.hidden_gem}</b></p>` : "";
+
+  panel.innerHTML = `
+    <div class="ranking-card">
+      <div class="ranking-header">
+        <span class="ranking-title">Claude Portfolio Ranking</span>
+        <span class="ranking-meta">${ts} &nbsp;|&nbsp; ${model}</span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="data-tbl ranking-tbl">
+          <thead><tr>
+            <th>Rank</th><th>Symbol</th><th>Risk</th>
+            <th>Rationale</th><th>Stock Play</th><th>Options Play</th><th>Alloc %</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="ranking-notes">${data.portfolio_notes || ""}</div>
+      ${gem}
+      <div class="ranking-footer">Tokens: ${inputT} in / ${outputT} out &nbsp;—&nbsp; Est. cost: $${cost}</div>
+    </div>
+    <div class="ranking-actions">
+      <button class="action-btn" onclick="runClaudeRanking()">Re-run Ranking</button>
+    </div>`;
+}
+
 // ── Fetch helpers ──────────────────────────────────────────────────────────
 
 async function fetchJSON(url) {
@@ -756,9 +843,10 @@ document.getElementById("btn-ignore")?.addEventListener("click", () => handleDis
 document.getElementById("btn-ack")?.addEventListener("click", () => handleDisclaimer("ack"));
 document.getElementById("btn-close-disc")?.addEventListener("click", () => handleDisclaimer("close"));
 
-// Boot: Fetch data immediately, but do NOT show loader or dashboard. 
+// Boot: Fetch data immediately, but do NOT show loader or dashboard.
 // Disclaimer screen is already visible via HTML.
 refresh().catch(err => console.error("Boot error:", err));
+loadRanking().catch(() => { /* ranking.json may not exist yet — silently ignore */ });
 
 // Badge age ticks every minute regardless of data poll rate
 setInterval(() => updateFreshnessBadge(state.meta?.last_updated_utc ?? null), 60_000);

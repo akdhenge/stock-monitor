@@ -113,6 +113,7 @@
     <button role="tab" data-panel="panel-watchlist" aria-selected="false">Watchlist</button>
     <button role="tab" data-panel="panel-alerts" aria-selected="false">Alerts</button>
     <button role="tab" data-panel="panel-ai" aria-selected="false">AI Research</button>
+    <button role="tab" data-panel="panel-ranking" aria-selected="false">Claude Ranking</button>
     <button role="tab" data-panel="panel-history" aria-selected="false">History</button>
   </nav>
 
@@ -130,6 +131,13 @@
 
   <section id="panel-ai" class="tab-panel" role="tabpanel">
     <div class="empty-state">Loading AI research…</div>
+  </section>
+
+  <section id="panel-ranking" class="tab-panel" role="tabpanel">
+    <div class="empty-state">
+      No ranking data yet.<br>
+      <button class="action-btn" style="margin-top:16px" onclick="runClaudeRanking()">Run Claude Ranking</button>
+    </div>
   </section>
 
   <section id="panel-history" class="tab-panel" role="tabpanel">

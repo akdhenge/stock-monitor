@@ -1,5 +1,5 @@
 const ALLOWED_ORIGINS = ["https://trader.akshaydhenge.uk"];
-const ALLOWED_TYPES = ["watchlist_add", "watchlist_remove", "watchlist_edit", "aiscan", "deep_scan"];
+const ALLOWED_TYPES = ["watchlist_add", "watchlist_remove", "watchlist_edit", "aiscan", "deep_scan", "claude_ranking"];
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
@@ -22,7 +22,7 @@ function validateCommand(cmd) {
   if (!ALLOWED_TYPES.includes(cmd.type)) {
     return `Unknown command type: ${cmd.type}`;
   }
-  if (cmd.type !== "deep_scan") {
+  if (cmd.type !== "deep_scan" && cmd.type !== "claude_ranking") {
     if (!cmd.symbol || typeof cmd.symbol !== "string") return "Missing or invalid symbol";
     cmd.symbol = cmd.symbol.toUpperCase().trim();
   }
@@ -65,6 +65,13 @@ export default {
       const validationError = validateCommand(cmd);
       if (validationError) {
         return json({ error: validationError }, 400, origin);
+      }
+
+      if (cmd.type === "claude_ranking") {
+        if (!cmd.passkey || cmd.passkey !== env.CLAUDE_RANK_PASSKEY) {
+          return json({ error: "Invalid passkey" }, 403, origin);
+        }
+        delete cmd.passkey;  // don't store passkey in R2
       }
 
       const cmdId = crypto.randomUUID();

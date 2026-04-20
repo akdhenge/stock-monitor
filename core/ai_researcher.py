@@ -179,16 +179,58 @@ class AIResearcher(QThread):
             )
             return
 
-        # 9. Cache and emit
+        # 9. Cache, Export, and emit
         _log.info(
             "AI research complete for %s — sentiment=%s direction=%s",
             self._symbol, result.get("sentiment"), result.get("direction"),
         )
         self.research_status.emit(f"✓ Done")
+        
+        try:
+            self._export_research(prompt, result)
+        except Exception as e:
+            _log.warning("Failed to export research for %s: %s", self._symbol, e)
+
         save_entry(self._symbol, result)
         self.research_complete.emit(result)
 
     # ── Data fetchers ──────────────────────────────────────────────────────────
+
+    def _export_research(self, prompt: str, result: dict) -> None:
+        """Export the compiled prompt and AI result to a daily markdown file."""
+        export_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "exports"))
+        os.makedirs(export_dir, exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        filepath = os.path.join(export_dir, f"research_prompts_{today}.md")
+        
+        content = ""
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+        symbol_header = f"## Symbol: {self._symbol}"
+        new_section = (
+            f"{symbol_header}\n"
+            f"**Timestamp:** {result.get('timestamp')}\n\n"
+            f"### Compiled Context Sent to AI\n"
+            f"```text\n{prompt}\n```\n\n"
+            f"### Final AI Response\n"
+            f"```json\n{json.dumps(result, indent=2)}\n```\n\n"
+            f"---\n\n"
+        )
+        
+        if symbol_header in content:
+            # Replace existing section for this symbol
+            import re
+            pattern = re.compile(rf"{re.escape(symbol_header)}\n.*?---\n\n", re.DOTALL)
+            content = pattern.sub(new_section, content)
+        else:
+            if not content:
+                content = f"# AI Research Export ({today})\n\n"
+            content += new_section
+            
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
 
     def _fetch_google_news(self, symbol: str, max_articles: int = 10) -> List[Dict[str, str]]:
         """Fetch recent news from Google News RSS for the given symbol."""
