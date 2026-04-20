@@ -50,6 +50,7 @@ body {
   line-height: 1.5;
   border-top: 4px solid var(--accent);
   cursor: crosshair;
+  overflow-x: hidden;
 }
 
 /* dark overlay to ensure text readability over the image */
@@ -406,10 +407,13 @@ header {
 /* ── Tables ── */
 .card>div {
   padding: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {
   width: 100%;
+  min-width: 480px;
   border-collapse: collapse;
 }
 
@@ -997,32 +1001,75 @@ footer {
 }
 
 /* ── Responsive ── */
+
+/* iOS Safari: background-attachment:fixed causes jank */
+@supports (-webkit-touch-callout: none) {
+  body { background-attachment: scroll; }
+}
+
 @media (max-width: 680px) {
   header {
-    padding: 0 14px;
+    padding: 0 10px;
+    gap: 10px;
+    height: 52px;
+  }
+
+  .brand-name { font-size: 11px; }
+  .brand-sub  { display: none; }
+
+  .freshness-badge {
+    font-size: 13px;
+    padding: 2px 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
   }
 
   .tab-panel {
-    padding: 14px 14px 32px;
+    padding: 12px 10px 32px;
   }
 
   .tab-bar {
-    padding: 0 8px;
+    padding: 0 4px;
+    top: 52px;
   }
 
-  td,
-  th {
-    padding: 8px;
+  .tab-bar button {
+    padding: 10px 10px 6px;
+    font-size: 8px;
   }
 
-  .score-bar {
-    display: none;
+  td, th {
+    padding: 6px 8px;
   }
 
-  /* Disclaimer Screen Mobile Fixes */
-  .disclaimer-screen {
-    padding: 16px;
+  .score-bar { display: none; }
+
+  /* Alert rows: stack on mobile */
+  .alert-row {
+    flex-wrap: wrap;
+    gap: 6px;
   }
+
+  .alert-ts  { min-width: unset; font-size: 14px; width: 100%; }
+  .alert-type { min-width: unset; }
+
+  /* Toast: full-width on mobile */
+  #cmd-toast {
+    left: 12px;
+    right: 12px;
+    bottom: 16px;
+    max-width: unset;
+    font-size: 16px;
+  }
+
+  /* Modal: tighter padding */
+  .modal { padding: 12px; }
+  .modal-box { padding: 20px; }
+
+  /* Disclaimer */
+  .disclaimer-screen { padding: 12px; }
 
   .disclaimer-content {
     padding: 20px;
@@ -1031,26 +1078,24 @@ footer {
 
   .disclaimer-text {
     font-size: 15px;
-    margin-bottom: 24px;
+    margin-bottom: 20px;
   }
 
   .disclaimer-buttons {
     flex-direction: column-reverse;
-    gap: 16px;
+    gap: 12px;
   }
 
   .btn-ignore {
     font-size: 20px;
-    padding: 16px 20px;
+    padding: 14px 20px;
     width: 100%;
-    box-shadow: 4px 4px 0px var(--accent-dim);
   }
 
   .btn-ack {
     font-size: 10px;
     padding: 12px 16px;
     width: 100%;
-    box-shadow: 2px 2px 0px rgba(255, 0, 60, 0.4);
   }
 
   #meme-text {
@@ -1060,10 +1105,10 @@ footer {
 
   #meme-gif-container {
     width: 100%;
-    box-shadow: 4px 4px 0px var(--accent-dim);
   }
 
-  .footer-disclaimer {
-    font-size: 1em;
-  }
+  .footer-disclaimer { font-size: 1em; }
+
+  /* Action buttons: wrap on mobile */
+  .action-btn { font-size: 9px; padding: 8px 12px; }
 }
