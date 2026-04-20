@@ -133,7 +133,7 @@ body::before {
 .disclaimer-content {
   position: relative;
   max-width: 800px;
-  background: var(--bg);
+  background: rgba(0, 0, 0, 0.85);
   border: 4px solid var(--accent);
   padding: 40px;
   box-shadow: 12px 12px 0px var(--accent-dim);
@@ -247,7 +247,7 @@ header {
   display: flex;
   align-items: center;
   gap: 20px;
-  box-shadow: 0 4px 0px rgba(57, 255, 20, 0.1);
+  box-shadow: 0 4px 0px rgba(57, 255, 20, 0.3);
 }
 
 .brand {
@@ -729,7 +729,7 @@ td:nth-child(2) b {
   padding: 14px 24px;
   margin: 16px 24px;
   color: var(--red);
-  box-shadow: 4px 4px 0px rgba(255, 0, 60, 0.1);
+  box-shadow: 4px 4px 0px rgba(255, 0, 60, 0.3);
 }
 
 .error-banner button {
@@ -1004,7 +1004,9 @@ footer {
 
 /* iOS Safari: background-attachment:fixed causes jank */
 @supports (-webkit-touch-callout: none) {
-  body { background-attachment: scroll; }
+  body {
+    background-attachment: scroll;
+  }
 }
 
 @media (max-width: 680px) {
@@ -1014,8 +1016,13 @@ footer {
     height: 52px;
   }
 
-  .brand-name { font-size: 11px; }
-  .brand-sub  { display: none; }
+  .brand-name {
+    font-size: 11px;
+  }
+
+  .brand-sub {
+    display: none;
+  }
 
   .freshness-badge {
     font-size: 13px;
@@ -1040,11 +1047,14 @@ footer {
     font-size: 8px;
   }
 
-  td, th {
+  td,
+  th {
     padding: 6px 8px;
   }
 
-  .score-bar { display: none; }
+  .score-bar {
+    display: none;
+  }
 
   /* Alert rows: stack on mobile */
   .alert-row {
@@ -1052,8 +1062,15 @@ footer {
     gap: 6px;
   }
 
-  .alert-ts  { min-width: unset; font-size: 14px; width: 100%; }
-  .alert-type { min-width: unset; }
+  .alert-ts {
+    min-width: unset;
+    font-size: 14px;
+    width: 100%;
+  }
+
+  .alert-type {
+    min-width: unset;
+  }
 
   /* Toast: full-width on mobile */
   #cmd-toast {
@@ -1065,11 +1082,18 @@ footer {
   }
 
   /* Modal: tighter padding */
-  .modal { padding: 12px; }
-  .modal-box { padding: 20px; }
+  .modal {
+    padding: 12px;
+  }
+
+  .modal-box {
+    padding: 20px;
+  }
 
   /* Disclaimer */
-  .disclaimer-screen { padding: 12px; }
+  .disclaimer-screen {
+    padding: 12px;
+  }
 
   .disclaimer-content {
     padding: 20px;
@@ -1107,8 +1131,13 @@ footer {
     width: 100%;
   }
 
-  .footer-disclaimer { font-size: 1em; }
+  .footer-disclaimer {
+    font-size: 1em;
+  }
 
   /* Action buttons: wrap on mobile */
-  .action-btn { font-size: 9px; padding: 8px 12px; }
+  .action-btn {
+    font-size: 9px;
+    padding: 8px 12px;
+  }
 }
