@@ -1,3 +1,12 @@
+function relativeTime(utcStr) {
+  if (!utcStr) return "";
+  const diffMin = Math.floor((Date.now() - new Date(utcStr).getTime()) / 60000);
+  if (diffMin <= 1)           return "just now";
+  if (diffMin < 60)           return `${diffMin}m ago`;
+  if (diffMin < 1440)         return `${Math.floor(diffMin / 60)}h ago`;
+  return `${Math.floor(diffMin / 1440)}d ago`;
+}
+
 // Detect data base: same-origin localhost uses relative path, prod uses R2 URL
 const IS_PROD = window.location.hostname !== "localhost" &&
                 window.location.hostname !== "127.0.0.1";
@@ -272,7 +281,7 @@ function renderRanking(data) {
     <div class="ranking-card">
       <div class="ranking-header">
         <span class="ranking-title">Claude Portfolio Ranking</span>
-        <span class="ranking-meta">${ts} &nbsp;|&nbsp; ${model}</span>
+        <span class="ranking-meta">last ran ${relativeTime(ts)} &nbsp;|&nbsp; ${model}</span>
       </div>
       <div class="tbl-wrap">
         <table class="data-tbl ranking-tbl">
@@ -341,20 +350,9 @@ function updateFreshnessBadge(utcStr) {
     badge.title = "";
     return;
   }
-  const dt = new Date(utcStr);
-  const ageMin = Math.floor((Date.now() - dt.getTime()) / 60000);
-  let label, cls;
-  if (ageMin < 60) {
-    label = ageMin <= 1 ? "Just now" : `${ageMin}m ago`;
-    cls = "fresh";
-  } else if (ageMin < 1440) {
-    label = `${Math.floor(ageMin / 60)}h ago`;
-    cls = "stale";
-  } else {
-    label = `${Math.floor(ageMin / 1440)}d ago`;
-    cls = "very-stale";
-  }
-  badge.textContent = `Last updated: ${label}`;
+  const ageMin = Math.floor((Date.now() - new Date(utcStr).getTime()) / 60000);
+  const cls = ageMin < 60 ? "fresh" : ageMin < 1440 ? "stale" : "very-stale";
+  badge.textContent = `Last updated: ${relativeTime(utcStr)}`;
   badge.className = `freshness-badge ${cls}`;
   badge.title = `${utcStr} UTC`;
 

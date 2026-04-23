@@ -49,6 +49,15 @@ class TelegramCommandPoller(QThread):
     cmd_mute = pyqtSignal(str, str)
     # symbol, side ("low"|"high"), new_price, reply_chat_id
     cmd_revise = pyqtSignal(str, str, float, str)
+    # reply_chat_id
+    cmd_portfolio   = pyqtSignal(str)
+    cmd_positions   = pyqtSignal(str)
+    cmd_performance = pyqtSignal(str)
+    cmd_tradelog    = pyqtSignal(str)
+    cmd_pause       = pyqtSignal(str)
+    cmd_resume      = pyqtSignal(str)
+    # symbol, reply_chat_id
+    cmd_sell = pyqtSignal(str, str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -162,12 +171,28 @@ class TelegramCommandPoller(QThread):
             self._handle_mute(parts, reply_chat_id)
         elif cmd == "/revise":
             self._handle_revise(parts, reply_chat_id)
+        elif cmd == "/portfolio":
+            self.cmd_portfolio.emit(reply_chat_id)
+        elif cmd == "/positions":
+            self.cmd_positions.emit(reply_chat_id)
+        elif cmd == "/performance":
+            self.cmd_performance.emit(reply_chat_id)
+        elif cmd == "/tradelog":
+            self.cmd_tradelog.emit(reply_chat_id)
+        elif cmd == "/pause":
+            self.cmd_pause.emit(reply_chat_id)
+        elif cmd == "/resume":
+            self.cmd_resume.emit(reply_chat_id)
+        elif cmd == "/sell":
+            self._handle_sell(parts, reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
                 reply_chat_id,
-                "Unknown command. Available: /add /remove /list /scan /top /detail /aiscan /stopaiscan /mute /revise\n"
-                "Tip: after /aiscan you can ask follow-up questions as plain text for 30 minutes.",
+                "Unknown command.\n"
+                "<b>Watchlist:</b> /add /remove /list /mute /revise\n"
+                "<b>Scanner:</b> /scan /top /detail /aiscan /stopaiscan\n"
+                "<b>Trader:</b> /portfolio /positions /performance /tradelog /pause /resume /sell SYMBOL",
             )
 
     def _handle_add(self, parts: list, reply_chat_id: str) -> None:
@@ -228,6 +253,14 @@ class TelegramCommandPoller(QThread):
             return
         symbol = parts[1].upper()
         self.cmd_mute.emit(symbol, reply_chat_id)
+
+    def _handle_sell(self, parts: list, reply_chat_id: str) -> None:
+        if len(parts) < 2:
+            TelegramNotifier.send_message(
+                self._token, reply_chat_id, "Usage: /sell SYMBOL"
+            )
+            return
+        self.cmd_sell.emit(parts[1].upper(), reply_chat_id)
 
     def _handle_revise(self, parts: list, reply_chat_id: str) -> None:
         # /revise SYMBOL low|high NEW_PRICE

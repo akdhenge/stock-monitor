@@ -49,6 +49,9 @@ _DEFAULTS: Dict[str, Any] = {
     "r2_bucket": "trader-data",
     "r2_endpoint_url": "",
     "r2_public_base_url": "https://data.trader.akshaydhenge.uk",
+    # Alpaca paper trading
+    "alpaca_api_key":    "",
+    "alpaca_secret_key": "",
 }
 
 
@@ -78,7 +81,7 @@ def save_settings(settings: Dict[str, Any]) -> None:
 
 _REDACTED_KEYS = {
     "telegram_token", "ai_claude_api_key", "ai_openrouter_api_key",
-    "email_password", "r2_secret_access_key",
+    "email_password", "r2_secret_access_key", "alpaca_secret_key",
 }
 
 

@@ -1,6 +1,7 @@
 import json
 import os
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Callable, Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
@@ -10,25 +11,42 @@ from PyQt5.QtWidgets import (
 )
 
 
+def _relative_time(ts_str: str) -> str:
+    try:
+        dt = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        diff = int((datetime.now(timezone.utc) - dt).total_seconds())
+        if diff < 60:
+            return "just now"
+        if diff < 3600:
+            return f"{diff // 60}m ago"
+        if diff < 86400:
+            return f"{diff // 3600}h ago"
+        return f"{diff // 86400}d ago"
+    except Exception:
+        return ts_str
+
+
 class ClaudeRankingDialog(QDialog):
     """Displays Claude's portfolio ranking of the top-10 scan results."""
 
-    def __init__(self, result: dict, parent=None):
+    def __init__(self, result: dict, parent=None, on_rerun: Optional[Callable] = None):
         super().__init__(parent)
         self.setWindowTitle("Claude Portfolio Ranking")
         self.setMinimumSize(1000, 600)
         self.setModal(False)
         self._result = result
+        self._on_rerun = on_rerun
         self._setup_ui(result)
 
     def _setup_ui(self, result: dict) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
-        # Title + timestamp
+        # Title + relative timestamp
         ts = result.get("generated_at", "")
         model = result.get("model", "")
-        title = QLabel(f"Claude Portfolio Ranking — {ts}  [{model}]")
+        rel = _relative_time(ts)
+        title = QLabel(f"Claude Portfolio Ranking — last ran {rel}  [{model}]")
         title.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(title)
 
@@ -106,11 +124,21 @@ class ClaudeRankingDialog(QDialog):
         view_log_btn.clicked.connect(self._show_usage_log)
         btn_row.addWidget(view_log_btn)
 
+        if self._on_rerun:
+            rerun_btn = QPushButton("Re-run Analysis")
+            rerun_btn.clicked.connect(self._trigger_rerun)
+            btn_row.addWidget(rerun_btn)
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
 
         layout.addLayout(btn_row)
+
+    def _trigger_rerun(self) -> None:
+        self.accept()
+        if self._on_rerun:
+            self._on_rerun()
 
     def _show_usage_log(self) -> None:
         path = os.path.join("data", "claude_usage_log.json")

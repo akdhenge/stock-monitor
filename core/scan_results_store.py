@@ -36,6 +36,8 @@ def _result_to_dict(r: ScanResult) -> Dict[str, Any]:
         "scan_mode": r.scan_mode,
         "score_congressional": r.score_congressional,
         "ai_rank": r.ai_rank,
+        "volatility_20d": r.volatility_20d,
+        "avg_volume_20d": r.avg_volume_20d,
         "timestamp": r.timestamp.isoformat(),
     }
 
@@ -69,6 +71,8 @@ def _dict_to_result(d: Dict[str, Any]) -> Optional[ScanResult]:
             scan_mode=d.get("scan_mode", "quick"),
             score_congressional=float(d.get("score_congressional", 0.0)),
             ai_rank=int(d["ai_rank"]) if d.get("ai_rank") is not None else None,
+            volatility_20d=d.get("volatility_20d"),
+            avg_volume_20d=d.get("avg_volume_20d"),
             timestamp=ts,
         )
     except (KeyError, TypeError, ValueError):

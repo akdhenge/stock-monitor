@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
@@ -79,6 +80,7 @@ class MainWindow(QMainWindow):
         # Claude ranking analyst
         self._ranking_analyst: Optional[ClaudeRankingAnalyst] = None
         self._pending_webcmd_ranking: Optional[str] = None  # cmd_id from web trigger
+        self._last_ranking_result: Optional[dict] = self._load_ranking_cache()
 
         # Web publisher
         self._web_publisher = WebPublisher(
@@ -115,11 +117,15 @@ class MainWindow(QMainWindow):
         self._ai_rank_results: Dict[str, Optional[float]] = {}  # symbol -> raw score (None=error)
         self._ai_rank_top10: List[ScanResult] = []  # held for post-ranking finalization
 
+        # Trader agent (autonomous paper trading)
+        self._trader_agent = None
+
         self._setup_ui()
         self._apply_settings(self._settings)
         self._watchlist_table.refresh(self._watchlist)
 
         QTimer.singleShot(500, self._start_poller)
+        QTimer.singleShot(1000, self._start_trader_agent)
 
         # 60-second tick for scheduled scans
         self._schedule_timer = QTimer(self)
@@ -287,6 +293,13 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_stopaiscan.connect(self._on_cmd_stopaiscan)
         self._cmd_poller.cmd_mute.connect(self._on_cmd_mute)
         self._cmd_poller.cmd_revise.connect(self._on_cmd_revise)
+        self._cmd_poller.cmd_portfolio.connect(self._on_cmd_portfolio)
+        self._cmd_poller.cmd_positions.connect(self._on_cmd_positions)
+        self._cmd_poller.cmd_performance.connect(self._on_cmd_performance)
+        self._cmd_poller.cmd_tradelog.connect(self._on_cmd_tradelog)
+        self._cmd_poller.cmd_pause.connect(self._on_cmd_pause)
+        self._cmd_poller.cmd_resume.connect(self._on_cmd_resume)
+        self._cmd_poller.cmd_sell.connect(self._on_cmd_sell)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -328,6 +341,8 @@ class MainWindow(QMainWindow):
         self._scanner.set_previous_top10(self._scanner_top10)
         self._scanner.set_previous_scores(self._scanner_prev_scores)
         self._scanner.deep_scan_complete.connect(self._on_deep_scan_complete)
+        if self._trader_agent is not None:
+            self._scanner.deep_scan_complete.connect(self._trader_agent.queue_scan_results)
         self._scanner.new_alert_entry.connect(self._on_deep_alert_entry)
         self._scanner.scan_progress.connect(self._scanner_panel.update_progress)
         self._scanner.scan_status.connect(self._scanner_panel.update_status)
@@ -350,6 +365,8 @@ class MainWindow(QMainWindow):
         self._scanner.set_previous_top5(self._scanner_top5)
         self._scanner.set_previous_scores(self._scanner_prev_scores)
         self._scanner.complete_scan_complete.connect(self._on_complete_scan_complete)
+        if self._trader_agent is not None:
+            self._scanner.complete_scan_complete.connect(self._trader_agent.queue_scan_results)
         self._scanner.new_top5_entry.connect(self._on_new_top5)
         self._scanner.scan_progress.connect(self._scanner_panel.update_progress)
         self._scanner.scan_status.connect(self._scanner_panel.update_status)
@@ -437,6 +454,8 @@ class MainWindow(QMainWindow):
         self._poll_status_label.setText(
             f"Last updated: {datetime.now().strftime('%H:%M:%S')}"
         )
+        if self._trader_agent is not None:
+            self._trader_agent.queue_price_tick(prices)
 
     def _on_poll_error(self, msg: str) -> None:
         self._poll_status_label.setText(f"Poll error: {msg}")
@@ -866,13 +885,35 @@ class MainWindow(QMainWindow):
 
     # ── Claude Ranking ────────────────────────────────────────────────────────
 
-    def _run_claude_ranking(self, trigger: str = "desktop") -> None:
+    @staticmethod
+    def _load_ranking_cache() -> Optional[dict]:
+        import json
+        path = os.path.join("data", "claude_ranking_cache.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def _run_claude_ranking(self, trigger: str = "desktop", force_refresh: bool = False) -> None:
+        if self._ranking_analyst is not None and self._ranking_analyst.isRunning():
+            QMessageBox.information(self, "In Progress", "Claude ranking is already running.")
+            return
+
+        if not force_refresh and self._last_ranking_result:
+            dlg = ClaudeRankingDialog(
+                self._last_ranking_result,
+                parent=self,
+                on_rerun=lambda: self._run_claude_ranking(trigger="desktop", force_refresh=True),
+            )
+            dlg.show()
+            return
+
         top10 = self._ai_rank_top10
         if not top10:
             QMessageBox.warning(self, "No Data", "No scan results available. Run a deep or complete scan first.")
-            return
-        if self._ranking_analyst is not None and self._ranking_analyst.isRunning():
-            QMessageBox.information(self, "In Progress", "Claude ranking is already running.")
             return
         self._ranking_analyst = ClaudeRankingAnalyst(
             top10, get_settings=lambda: self._settings, trigger=trigger, parent=self
@@ -886,6 +927,7 @@ class MainWindow(QMainWindow):
         self._scan_status_label.setText("Claude ranking started…")
 
     def _on_ranking_complete(self, result: dict) -> None:
+        self._last_ranking_result = result
         self._scan_status_label.setText(
             f"Claude ranking complete — ${result.get('cost_usd', 0):.4f} "
             f"({result.get('input_tokens', 0):,}+{result.get('output_tokens', 0):,} tokens)"
@@ -896,7 +938,11 @@ class MainWindow(QMainWindow):
                 "Ranking published to ranking.json"
             )
             self._pending_webcmd_ranking = None
-        dlg = ClaudeRankingDialog(result, parent=self)
+        dlg = ClaudeRankingDialog(
+            result,
+            parent=self,
+            on_rerun=lambda: self._run_claude_ranking(trigger="desktop", force_refresh=True),
+        )
         dlg.show()
 
     def _on_ranking_error(self, err: str) -> None:
@@ -1419,4 +1465,181 @@ class MainWindow(QMainWindow):
         if self._web_publisher.isRunning():
             self._web_publisher.stop()
             self._web_publisher.wait(3000)
+        if self._trader_agent is not None and self._trader_agent.isRunning():
+            self._trader_agent.stop()
+            self._trader_agent.wait(5000)
         event.accept()
+
+    # ── Trader Agent ──────────────────────────────────────────────────────────
+
+    def _start_trader_agent(self) -> None:
+        from core.trader_agent import TraderAgent
+        self._trader_agent = TraderAgent(get_settings=lambda: self._settings, parent=self)
+        self._trader_agent.trade_executed.connect(self._on_agent_trade)
+        self._trader_agent.agent_status.connect(
+            lambda msg: self._scan_status_label.setText(msg)
+        )
+        self._trader_agent.agent_halted.connect(self._on_agent_halted)
+        self._trader_agent.start()
+
+    def _on_agent_trade(self, trade: dict) -> None:
+        action = trade.get("action", "")
+        sym    = trade.get("symbol", "")
+        if action == "BUY":
+            shares = trade.get("shares", 0)
+            price  = trade.get("fill_price", 0)
+            stop   = trade.get("stop", 0)
+            target = trade.get("target")
+            thesis = trade.get("thesis", "")
+            msg = (
+                f"<b>AGENT BUY</b> {sym}\n"
+                f"{shares:.0f} shares @ ${price:.2f}\n"
+                f"Stop: ${stop:.2f}"
+                + (f"  Target: ${target:.2f}" if target else "")
+                + (f"\n<i>{thesis}</i>" if thesis else "")
+            )
+        elif action == "SELL":
+            pnl     = trade.get("realized_pnl", 0)
+            pnl_pct = trade.get("realized_pct", 0)
+            reason  = trade.get("reason", "")
+            sign    = "+" if pnl >= 0 else ""
+            msg = (
+                f"<b>AGENT SELL</b> {sym}\n"
+                f"P&L: {sign}${pnl:.0f} ({sign}{pnl_pct:.1f}%)\n"
+                f"Reason: {reason}"
+            )
+        else:
+            msg = f"<b>AGENT</b> {action} {sym}"
+
+        _log.info("Agent trade: %s", msg)
+        if hasattr(self, "_notifier") and self._notifier is not None:
+            try:
+                self._notifier.send_message(msg)
+            except Exception:
+                pass
+
+    def _on_agent_halted(self, reason: str) -> None:
+        _log.warning("Agent halted: %s", reason)
+        msg = f"<b>AGENT HALTED</b>\n{reason}\nSend /resume to re-enable."
+        if hasattr(self, "_notifier") and self._notifier is not None:
+            try:
+                self._notifier.send_message(msg)
+            except Exception:
+                pass
+
+    # ── Trader Telegram commands ───────────────────────────────────────────────
+
+    def _on_cmd_portfolio(self, reply_chat_id: str) -> None:
+        from core.trade_journal import read_equity_curve
+        from core.portfolio import load_all_meta, load_trader_config
+        token = self._settings.get("telegram_token", "")
+        try:
+            curve = read_equity_curve(last_n=1)
+            meta_all = load_all_meta()
+            cfg = load_trader_config()
+            if curve:
+                snap = curve[-1]
+                nav  = snap.get("nav", 0)
+                cash = snap.get("cash", 0)
+                pos_val = snap.get("positions_value", 0)
+                lines = [
+                    "<b>Portfolio</b>",
+                    f"NAV: <b>${nav:,.0f}</b>",
+                    f"Cash: ${cash:,.0f}  Invested: ${pos_val:,.0f}",
+                    f"Positions: {len(meta_all)}",
+                    f"Trader: {'ENABLED' if cfg.get('enabled') else 'PAUSED'}"
+                    + (" (dry-run)" if cfg.get("dry_run") else ""),
+                ]
+            else:
+                lines = ["<b>Portfolio</b>", "No NAV snapshot yet — agent hasn't run a daily snapshot."]
+                if meta_all:
+                    lines.append(f"Open positions: {len(meta_all)}")
+            from notifiers.telegram_notifier import TelegramNotifier
+            TelegramNotifier.send_message(token, reply_chat_id, "\n".join(lines))
+        except Exception as exc:
+            from notifiers.telegram_notifier import TelegramNotifier
+            TelegramNotifier.send_message(token, reply_chat_id, f"Portfolio error: {exc}")
+
+    def _on_cmd_positions(self, reply_chat_id: str) -> None:
+        from core.portfolio import load_all_meta
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._settings.get("telegram_token", "")
+        meta_all = load_all_meta()
+        if not meta_all:
+            TelegramNotifier.send_message(token, reply_chat_id, "No open positions.")
+            return
+        lines = [f"<b>Positions ({len(meta_all)})</b>"]
+        for sym, m in meta_all.items():
+            from datetime import datetime
+            days = (datetime.now() - datetime.fromisoformat(m.opened_at)).days
+            line = f"<b>{sym}</b> entry ${m.entry_price:.2f}  stop ${m.stop_loss_price:.2f}"
+            if m.target_price:
+                line += f"  target ${m.target_price:.2f}"
+            line += f"  ({days}d)"
+            lines.append(line)
+        TelegramNotifier.send_message(token, reply_chat_id, "\n".join(lines))
+
+    def _on_cmd_performance(self, reply_chat_id: str) -> None:
+        from core.performance_tracker import compute_metrics, format_performance_telegram
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._settings.get("telegram_token", "")
+        try:
+            metrics = compute_metrics()
+            msg = format_performance_telegram(metrics)
+        except Exception as exc:
+            msg = f"Performance error: {exc}"
+        TelegramNotifier.send_message(token, reply_chat_id, msg)
+
+    def _on_cmd_tradelog(self, reply_chat_id: str) -> None:
+        from core.trade_journal import read_journal
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._settings.get("telegram_token", "")
+        fills = [e for e in read_journal(last_n=200) if e.get("type") == "fill"][-10:]
+        if not fills:
+            TelegramNotifier.send_message(token, reply_chat_id, "No trades yet.")
+            return
+        lines = ["<b>Last trades</b>"]
+        for f in reversed(fills):
+            side = f.get("side", "?")
+            sym  = f.get("symbol", "?")
+            price = f.get("fill_price", 0)
+            ts = f.get("ts", "")[:10]
+            line = f"{ts} <b>{side}</b> {sym} @ ${price:.2f}"
+            pnl = f.get("realized_pnl")
+            if pnl is not None:
+                sign = "+" if pnl >= 0 else ""
+                line += f"  P&L: {sign}${pnl:.0f}"
+            lines.append(line)
+        TelegramNotifier.send_message(token, reply_chat_id, "\n".join(lines))
+
+    def _on_cmd_pause(self, reply_chat_id: str) -> None:
+        from core.portfolio import load_trader_config, save_trader_config
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._settings.get("telegram_token", "")
+        cfg = load_trader_config()
+        cfg["enabled"] = False
+        save_trader_config(cfg)
+        _log.info("Trader paused via Telegram")
+        TelegramNotifier.send_message(token, reply_chat_id,
+            "Trader <b>PAUSED</b>. No new entries or exits until /resume.")
+
+    def _on_cmd_resume(self, reply_chat_id: str) -> None:
+        from core.portfolio import load_trader_config, save_trader_config
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._settings.get("telegram_token", "")
+        cfg = load_trader_config()
+        cfg["enabled"] = True
+        save_trader_config(cfg)
+        _log.info("Trader resumed via Telegram")
+        TelegramNotifier.send_message(token, reply_chat_id,
+            "Trader <b>RESUMED</b>. Agent will trade on next scan cycle.")
+
+    def _on_cmd_sell(self, symbol: str, reply_chat_id: str) -> None:
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._settings.get("telegram_token", "")
+        if self._trader_agent is None or not self._trader_agent.isRunning():
+            TelegramNotifier.send_message(token, reply_chat_id, "Trader agent is not running.")
+            return
+        self._trader_agent.queue_forced_sell(symbol)
+        TelegramNotifier.send_message(token, reply_chat_id,
+            f"Forced sell queued for <b>{symbol}</b>. Will execute on next tick.")

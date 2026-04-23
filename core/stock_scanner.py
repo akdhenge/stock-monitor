@@ -375,14 +375,18 @@ class StockScanner(QThread):
         macd_bullish: Optional[bool] = None
         near_200d_ma: Optional[bool] = None
         volume_spike: Optional[bool] = None
+        volatility_20d: Optional[float] = None
+        avg_volume_20d: Optional[float] = None
 
         try:
             hist = ticker.history(period="1y")
             if not hist.empty and len(hist) >= 20:
-                rsi_val      = self._compute_rsi(hist["Close"])
-                macd_bullish = self._compute_macd_bullish(hist["Close"])
-                near_200d_ma = self._compute_near_200d_ma(hist["Close"], price)
-                volume_spike = self._compute_volume_spike(hist["Volume"])
+                rsi_val        = self._compute_rsi(hist["Close"])
+                macd_bullish   = self._compute_macd_bullish(hist["Close"])
+                near_200d_ma   = self._compute_near_200d_ma(hist["Close"], price)
+                volume_spike   = self._compute_volume_spike(hist["Volume"])
+                volatility_20d = self._compute_volatility_20d(hist["Close"])
+                avg_volume_20d = self._compute_avg_volume_20d(hist["Volume"])
         except Exception:
             pass
 
@@ -404,6 +408,8 @@ class StockScanner(QThread):
             near_200d_ma=near_200d_ma,
             volume_spike=volume_spike,
             scan_mode=scan_mode,
+            volatility_20d=volatility_20d,
+            avg_volume_20d=avg_volume_20d,
         )
 
     # ── Technical Indicators ──────────────────────────────────────────────────
@@ -448,6 +454,24 @@ class StockScanner(QThread):
             avg20  = float(volume.iloc[-21:-1].mean())
             latest = float(volume.iloc[-1])
             return bool(avg20 > 0 and latest > avg20 * 1.5)
+        except Exception:
+            return None
+
+    def _compute_volatility_20d(self, close) -> Optional[float]:
+        try:
+            if len(close) < 21:
+                return None
+            returns = close.pct_change().dropna()
+            vol = float(returns.iloc[-20:].std()) * (252 ** 0.5)
+            return round(vol, 4)
+        except Exception:
+            return None
+
+    def _compute_avg_volume_20d(self, volume) -> Optional[float]:
+        try:
+            if len(volume) < 20:
+                return None
+            return round(float(volume.iloc[-20:].mean()), 0)
         except Exception:
             return None
 

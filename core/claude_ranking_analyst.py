@@ -211,9 +211,14 @@ class ClaudeRankingAnalyst(QThread):
             },
             method="POST",
         )
+        import urllib.error
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            _log.error("Claude API %s — model=%s body=%s", exc, model, error_body)
+            raise RuntimeError(f"Claude API {exc} — {error_body}") from exc
         except Exception as exc:
             raise RuntimeError(f"Claude API request failed: {exc}") from exc
 

@@ -26,4 +26,6 @@ class ScanResult:
     scan_mode: str = "quick"
     score_congressional: float = 0.0   # 0–100, tracked-politician buy/sell signal
     ai_rank: Optional[int] = None      # 1–10 rank assigned after AI ranking; None = not yet ranked
+    volatility_20d: Optional[float] = None   # annualized 20-day return std dev (e.g. 0.32 = 32%)
+    avg_volume_20d: Optional[float] = None   # 20-day average daily volume
     timestamp: datetime = field(default_factory=datetime.now)
