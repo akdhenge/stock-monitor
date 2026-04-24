@@ -98,5 +98,10 @@ def load_scan_results() -> List[ScanResult]:
 
 def save_scan_results(results: List[ScanResult]) -> None:
     _ensure_data_dir()
+    if results:
+        mode = results[0].scan_mode
+        existing = load_scan_results()
+        kept = [r for r in existing if r.scan_mode != mode]
+        results = kept + results
     with open(_RESULTS_PATH, "w", encoding="utf-8") as f:
         json.dump([_result_to_dict(r) for r in results], f, indent=2)

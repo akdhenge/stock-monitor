@@ -876,7 +876,7 @@ class MainWindow(QMainWindow):
                     self._web_cmd_poller.write_done(cmd_id, "ok", "ranking_already_running")
                 return
             self._pending_webcmd_ranking = cmd_id
-            self._run_claude_ranking(trigger="web")
+            self._run_claude_ranking(trigger="web", force_refresh=True)
 
         else:
             _log.warning("WebCommandPoller: unknown command type: %s", cmd_type)
