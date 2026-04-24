@@ -36,6 +36,7 @@ _CONFIG_DEFAULTS: Dict = {
     "min_avg_volume":         1_000_000,
     "max_position_age_days":  20,
     "vix_halt_threshold":     30.0,
+    "earnings_block_days":    3,
 }
 
 

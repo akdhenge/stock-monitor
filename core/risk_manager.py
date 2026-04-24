@@ -154,9 +154,13 @@ def size_position(
         vol_factor = max(vol_factor, 0.5)  # floor at 50% — don't zero out
         base_pct *= vol_factor
 
+    min_order = nav * min_pct
+    if available < min_order:
+        return 0.0  # not enough free cash — caller skips the trade
+
     dollars = nav * base_pct
     dollars = min(dollars, available)
-    dollars = max(dollars, nav * min_pct)
+    dollars = max(dollars, min_order)
     dollars = min(dollars, nav * max_pct)
 
     return round(dollars, 2)

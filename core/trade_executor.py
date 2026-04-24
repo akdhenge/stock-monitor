@@ -87,28 +87,59 @@ class TradeExecutor:
 
     # ── Order execution ────────────────────────────────────────────────────────
 
+    def _get_ask_price(self, symbol: str) -> Optional[float]:
+        """Fetch current ask price via yfinance. Returns None on failure."""
+        try:
+            import yfinance as yf
+            info = yf.Ticker(symbol).fast_info
+            ask = getattr(info, "ask", None) or getattr(info, "last_price", None)
+            if ask and float(ask) > 0:
+                return float(ask)
+        except Exception:
+            pass
+        return None
+
     def buy(self, symbol: str, dollars: float) -> Tuple[Optional[str], str]:
         """
-        Submit a market buy order for `dollars` notional.
+        Submit a limit buy order for `dollars` notional.
+        Fetches current ask and places limit at ask + 0.1% to avoid chasing;
+        falls back to market order if quote is unavailable.
         Returns (order_id, status) or (None, error_message).
-        Only submits during RTH; returns a queued-flag message otherwise.
+        Only submits during RTH.
         """
-        from alpaca.trading.requests import MarketOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
 
         if not is_rth():
             return None, "outside RTH — order not placed (queue manually or extend hours)"
 
+        ask = self._get_ask_price(symbol)
         try:
-            req = MarketOrderRequest(
-                symbol=symbol.upper(),
-                notional=round(dollars, 2),
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-            )
+            if ask:
+                from alpaca.trading.requests import LimitOrderRequest
+                limit_price = round(ask * 1.001, 2)  # 0.1% above ask ensures fill
+                qty = max(1, int(dollars / limit_price))
+                req = LimitOrderRequest(
+                    symbol=symbol.upper(),
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=limit_price,
+                )
+                _log.info("LIMIT BUY %s %d shares @ $%.2f (budget $%.0f)",
+                          symbol, qty, limit_price, dollars)
+            else:
+                from alpaca.trading.requests import MarketOrderRequest
+                req = MarketOrderRequest(
+                    symbol=symbol.upper(),
+                    notional=round(dollars, 2),
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                )
+                _log.info("MARKET BUY %s $%.2f (no quote available)", symbol, dollars)
+
             order = self._client.submit_order(req)
             order_id = str(order.id)
-            _log.info("BUY %s $%.2f — order %s status=%s", symbol, dollars, order_id, order.status)
+            _log.info("BUY %s submitted — order %s status=%s", symbol, order_id, order.status)
             return order_id, str(order.status)
         except Exception as exc:
             _log.error("BUY %s failed: %s", symbol, exc)

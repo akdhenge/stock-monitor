@@ -64,6 +64,7 @@ class TraderAgent(QThread):
         self._ath_nav      = 0.0            # all-time-high NAV
         self._last_snapshot_date = ""       # YYYY-MM-DD
         self._last_tune_count    = 0        # closed-trade count at last self-tune
+        self._news_alert_cooldown: Dict[str, float] = {}  # sym → last alert epoch
 
     # ── Public slot-like methods (called from GUI thread) ──────────────────────
 
@@ -159,6 +160,37 @@ class TraderAgent(QThread):
         self.agent_status.emit("Trader: evaluating scan results…")
         cycle_id = str(uuid.uuid4())[:8]
 
+        # VIX gate — halt new entries if market fear is elevated
+        vix_threshold = config.get("vix_halt_threshold", 30.0)
+        try:
+            import yfinance as yf
+            vix = yf.Ticker("^VIX").fast_info.last_price
+            if vix and float(vix) > vix_threshold:
+                _log.info("TraderAgent: VIX %.1f > %.0f threshold — skipping entries this cycle",
+                          float(vix), vix_threshold)
+                self.agent_status.emit(f"Trader: VIX {float(vix):.1f} > {vix_threshold:.0f} — entries paused")
+                return
+        except Exception:
+            pass  # if VIX fetch fails, proceed normally
+
+        # SPY regime — halve position sizes when SPY is below its 200-DMA
+        spy_regime_factor = 1.0
+        try:
+            import yfinance as yf
+            spy_hist = yf.Ticker("SPY").history(period="1y", interval="1d")
+            if len(spy_hist) >= 200:
+                sma200    = float(spy_hist["Close"].tail(200).mean())
+                spy_price = float(spy_hist["Close"].iloc[-1])
+                if spy_price < sma200:
+                    spy_regime_factor = 0.5
+                    _log.info("TraderAgent: SPY $%.2f < 200-DMA $%.2f — half-size mode",
+                              spy_price, sma200)
+                    self.agent_status.emit(
+                        f"Trader: SPY ${spy_price:.0f} < 200-DMA ${sma200:.0f} — half-size entries"
+                    )
+        except Exception:
+            pass
+
         try:
             account = self._executor.get_account()
         except Exception as exc:
@@ -216,7 +248,16 @@ class TraderAgent(QThread):
 
             scan_result = scan_by_symbol.get(sym)
             if scan_result is None:
-                # Symbol not in this scan batch — skip silently
+                _log.debug("TraderAgent: %s ranked but not in this scan batch — skipped", sym)
+                continue
+
+            # Earnings gate — block entry within N days of earnings
+            block_days = config.get("earnings_block_days", 3)
+            dte = self._days_to_earnings(sym)
+            if dte is not None and dte <= block_days:
+                _log.info("TraderAgent: %s skipped — earnings in %d day(s)", sym, dte)
+                log_decision(sym, "REJECT", f"earnings in {dte}d (block_days={block_days})",
+                             scan_score=scan_result.total_score, nav_at_eval=nav, cycle_id=cycle_id)
                 continue
 
             ai_research  = get_cached_entry(sym)
@@ -263,6 +304,14 @@ class TraderAgent(QThread):
                 cash=cash,
                 config=config,
             )
+            if dollars <= 0:
+                log_decision(sym, "REJECT", "insufficient cash after reserve for minimum size",
+                             scan_score=scan_result.total_score, decision_score=dec_score,
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                continue
+
+            if spy_regime_factor < 1.0:
+                dollars = round(dollars * spy_regime_factor, 2)
 
             thesis = self._build_thesis(sym, ai_research, ranked_item)
             log_decision(sym, "BUY", "all gates passed",
@@ -397,6 +446,53 @@ class TraderAgent(QThread):
             _log.info("Heartbeat: target hit for %s @ $%.2f — partial exit", sym, price)
             if not config.get("dry_run", True):
                 self._execute_partial_exit(sym, meta, price)
+
+        # News surge detection for open positions
+        self._check_position_news(meta_all)
+
+        # IV snapshot — builds history for IVR computation (Phase 2 options)
+        try:
+            from core.iv_tracker import get_current_iv, update_iv_snapshot
+            for sym in list(meta_all.keys()):
+                iv = get_current_iv(sym)
+                if iv:
+                    update_iv_snapshot(sym, iv)
+        except Exception as exc:
+            _log.debug("IV snapshot error: %s", exc)
+
+    # ── Market intelligence helpers ───────────────────────────────────────────
+
+    _NEWS_SURGE_THRESHOLD = 3      # articles in the last hour to trigger alert
+    _NEWS_COOLDOWN_SECS   = 7200   # 2 hours between re-alerts per symbol
+
+    def _check_position_news(self, meta_all: dict) -> None:
+        """
+        Scan recent news for each open position. If 3+ articles published in
+        the last hour, emit a status alert so the user can run /aiscan.
+        Uses a per-symbol 2-hour cooldown to avoid repeated alerts.
+        """
+        if not meta_all:
+            return
+        import yfinance as yf
+        cutoff_ts = time.time() - 3600  # epoch timestamp 1 hour ago
+        for sym in list(meta_all.keys()):
+            last_alert = self._news_alert_cooldown.get(sym, 0)
+            if time.time() - last_alert < self._NEWS_COOLDOWN_SECS:
+                continue
+            try:
+                news = yf.Ticker(sym).news or []
+                recent = [n for n in news
+                          if n.get("providerPublishTime", 0) >= cutoff_ts]
+                if len(recent) >= self._NEWS_SURGE_THRESHOLD:
+                    titles = "; ".join(n.get("title", "")[:60] for n in recent[:3])
+                    _log.warning("NEWS SURGE %s: %d articles in last hour — %s",
+                                 sym, len(recent), titles)
+                    self.agent_status.emit(
+                        f"News surge on {sym} ({len(recent)} articles) — consider /aiscan {sym}"
+                    )
+                    self._news_alert_cooldown[sym] = time.time()
+            except Exception:
+                pass
 
     # ── Trade execution helpers ────────────────────────────────────────────────
 
@@ -557,6 +653,36 @@ class TraderAgent(QThread):
         if play:
             parts.append(play[:80])
         return " | ".join(parts) if parts else f"{symbol} ranked #{ranked_item.get('rank', '?')}"
+
+    @staticmethod
+    def _days_to_earnings(symbol: str) -> Optional[int]:
+        """Return days until next earnings, or None if unavailable."""
+        try:
+            import yfinance as yf
+            from datetime import date, timezone
+            cal = yf.Ticker(symbol).calendar
+            if cal is None:
+                return None
+            # calendar can be a dict or DataFrame depending on yfinance version
+            if hasattr(cal, "to_dict"):
+                cal = cal.to_dict()
+            dates = cal.get("Earnings Date") or cal.get("earnings_date") or []
+            if not dates:
+                return None
+            today = date.today()
+            future = []
+            for d in (dates if isinstance(dates, list) else [dates]):
+                if hasattr(d, "date"):
+                    d = d.date()
+                elif hasattr(d, "to_pydatetime"):
+                    d = d.to_pydatetime().date()
+                if isinstance(d, datetime):
+                    d = d.date()
+                if d >= today:
+                    future.append((d - today).days)
+            return min(future) if future else None
+        except Exception:
+            return None
 
     @staticmethod
     def _parse_target(stock_play: str, current_price: Optional[float]) -> Optional[float]:
