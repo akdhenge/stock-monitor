@@ -65,6 +65,78 @@ class TraderAgent(QThread):
         self._last_snapshot_date = ""       # YYYY-MM-DD
         self._last_tune_count    = 0        # closed-trade count at last self-tune
         self._news_alert_cooldown: Dict[str, float] = {}  # sym → last alert epoch
+        self._steps: list = []       # last 30 audit steps written to agent_status.json
+        self._cb_active: bool = False  # circuit breaker state for web status
+
+    # ── Step logging ───────────────────────────────────────────────────────────
+
+    def _log_step(self, text: str, status: str = "ok") -> None:
+        entry = {
+            "utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "text": text,
+            "status": status,
+        }
+        self._steps.append(entry)
+        if len(self._steps) > 30:
+            self._steps = self._steps[-30:]
+        _log.info("STEP [%s] %s", status, text)
+
+    def _write_agent_status(self, status_text: str = "") -> None:
+        """Write agent_status.json locally and upload to R2."""
+        positions_count = len(load_all_meta())
+        payload = {
+            "schema_version": 1,
+            "last_updated_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status_text": status_text or (self._steps[-1]["text"] if self._steps else "Idle"),
+            "circuit_breaker_active": self._cb_active,
+            "positions_count": positions_count,
+            "ath_nav": self._ath_nav,
+            "steps": list(self._steps),
+        }
+        pub_dir = os.path.join(os.path.dirname(__file__), "..", "data", "web_publish")
+        os.makedirs(pub_dir, exist_ok=True)
+        path = os.path.join(pub_dir, "agent_status.json")
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp, path)
+        except Exception as exc:
+            _log.warning("Could not write agent_status.json: %s", exc)
+            return
+        self._upload_status_to_r2(path)
+
+    def _upload_status_to_r2(self, path: str) -> None:
+        settings = self._get_settings()
+        account_id = settings.get("r2_account_id", "").strip()
+        access_key = settings.get("r2_access_key_id", "").strip()
+        secret_key = settings.get("r2_secret_access_key", "").strip()
+        bucket     = settings.get("r2_bucket", "trader-data").strip()
+        endpoint   = settings.get("r2_endpoint_url", "").strip()
+        if not all([account_id, access_key, secret_key, bucket]):
+            return
+        if not endpoint:
+            endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+        try:
+            import boto3
+            from botocore.config import Config
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                config=Config(signature_version="s3v4"),
+            )
+            with open(path, "rb") as f:
+                s3.put_object(
+                    Bucket=bucket,
+                    Key="agent_status.json",
+                    Body=f,
+                    ContentType="application/json",
+                    CacheControl="no-cache, max-age=0",
+                )
+        except Exception as exc:
+            _log.debug("agent_status.json R2 upload failed: %s", exc)
 
     # ── Public slot-like methods (called from GUI thread) ──────────────────────
 
@@ -110,6 +182,8 @@ class TraderAgent(QThread):
         self._executor = self._init_executor()
         if self._executor is None:
             self.agent_status.emit("Trader: no Alpaca keys — disabled")
+            self._log_step("Startup failed — no Alpaca API keys configured", "error")
+            self._write_agent_status("Trader: no Alpaca keys — disabled")
             return
 
         # Seed all-time-high from portfolio history
@@ -118,8 +192,11 @@ class TraderAgent(QThread):
         except Exception:
             pass
 
-        self.agent_status.emit("Trader: running (dry-run)" if load_trader_config().get("dry_run") else "Trader: LIVE paper")
+        mode_str = "dry-run" if load_trader_config().get("dry_run") else "LIVE paper"
+        self.agent_status.emit(f"Trader: running ({mode_str})")
         _log.info("TraderAgent: executor ready, ATH NAV=%.2f", self._ath_nav)
+        self._log_step(f"Agent ready ({mode_str}) — ATH NAV ${self._ath_nav:,.0f}")
+        self._write_agent_status()
 
         last_heartbeat = time.time()
 
@@ -158,6 +235,7 @@ class TraderAgent(QThread):
             return
 
         self.agent_status.emit("Trader: evaluating scan results…")
+        self._log_step(f"Scan received — {len(results)} stocks to evaluate")
         cycle_id = str(uuid.uuid4())[:8]
 
         # VIX gate — halt new entries if market fear is elevated
@@ -168,8 +246,12 @@ class TraderAgent(QThread):
             if vix and float(vix) > vix_threshold:
                 _log.info("TraderAgent: VIX %.1f > %.0f threshold — skipping entries this cycle",
                           float(vix), vix_threshold)
+                self._log_step(f"VIX: {float(vix):.1f} > {vix_threshold:.0f} — entries paused (high fear)", "warn")
                 self.agent_status.emit(f"Trader: VIX {float(vix):.1f} > {vix_threshold:.0f} — entries paused")
+                self._write_agent_status()
                 return
+            elif vix:
+                self._log_step(f"VIX: {float(vix):.1f} — market fear low, entries enabled")
         except Exception:
             pass  # if VIX fetch fails, proceed normally
 
@@ -185,9 +267,12 @@ class TraderAgent(QThread):
                     spy_regime_factor = 0.5
                     _log.info("TraderAgent: SPY $%.2f < 200-DMA $%.2f — half-size mode",
                               spy_price, sma200)
+                    self._log_step(f"SPY: ${spy_price:.0f} < 200-DMA ${sma200:.0f} — half-size mode active", "warn")
                     self.agent_status.emit(
                         f"Trader: SPY ${spy_price:.0f} < 200-DMA ${sma200:.0f} — half-size entries"
                     )
+                else:
+                    self._log_step(f"SPY: ${spy_price:.0f} above 200-DMA ${sma200:.0f} — full size")
         except Exception:
             pass
 
@@ -195,22 +280,30 @@ class TraderAgent(QThread):
             account = self._executor.get_account()
         except Exception as exc:
             _log.error("TraderAgent: could not fetch account: %s", exc)
+            self._log_step(f"Alpaca account fetch failed: {exc}", "error")
+            self._write_agent_status()
             return
 
         nav  = account["equity"]
         cash = account["cash"]
+        self._log_step(f"Account: NAV ${nav:,.0f} / cash ${cash:,.0f}")
 
         # Circuit breaker check
         intraday_pnl = account["day_pnl"]
         halted, halt_reason = check_circuit_breaker(nav, self._ath_nav, intraday_pnl, config)
         if halted:
+            self._cb_active = True
             msg = f"TraderAgent HALTED: {halt_reason}"
             _log.warning(msg)
+            self._log_step(f"Circuit breaker TRIGGERED — {halt_reason}", "error")
             self.agent_halted.emit(msg)
             self.agent_status.emit(f"Trader: HALTED — {halt_reason}")
             if nav > self._ath_nav:
                 self._ath_nav = nav
+            self._write_agent_status()
             return
+        self._cb_active = False
+        self._log_step("Circuit breaker: clear")
 
         # Update ATH
         if nav > self._ath_nav:
@@ -230,12 +323,17 @@ class TraderAgent(QThread):
 
         # Load ClaudeRankingAnalyst cache
         ranking = self._load_ranking_cache()
+        ranked_list = ranking.get("ranked", []) if ranking else []
+        if ranked_list:
+            self._log_step(f"Claude ranking loaded — {len(ranked_list)} candidates")
+        else:
+            self._log_step("No Claude ranking cached — evaluating by scan score only", "warn")
 
         # Build a lookup of scan results by symbol
         scan_by_symbol = {r.symbol: r for r in results if hasattr(r, "symbol")}
 
         # Evaluate ranked candidates (top 5 only — they have allocation_pct)
-        ranked = ranking.get("ranked", []) if ranking else []
+        ranked = ranked_list
         entries_made = 0
 
         for ranked_item in ranked[:5]:
@@ -249,6 +347,7 @@ class TraderAgent(QThread):
             scan_result = scan_by_symbol.get(sym)
             if scan_result is None:
                 _log.debug("TraderAgent: %s ranked but not in this scan batch — skipped", sym)
+                self._log_step(f"{sym}: not in this scan batch — skipped", "skip")
                 continue
 
             # Earnings gate — block entry within N days of earnings
@@ -256,6 +355,7 @@ class TraderAgent(QThread):
             dte = self._days_to_earnings(sym)
             if dte is not None and dte <= block_days:
                 _log.info("TraderAgent: %s skipped — earnings in %d day(s)", sym, dte)
+                self._log_step(f"{sym}: skipped — earnings in {dte}d (block {block_days}d)", "skip")
                 log_decision(sym, "REJECT", f"earnings in {dte}d (block_days={block_days})",
                              scan_score=scan_result.total_score, nav_at_eval=nav, cycle_id=cycle_id)
                 continue
@@ -281,6 +381,7 @@ class TraderAgent(QThread):
                 config=config,
             )
             if not passed:
+                self._log_step(f"{sym}: rejected — {reject_reason}", "skip")
                 log_decision(sym, "REJECT", reject_reason,
                              scan_score=scan_result.total_score,
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
@@ -290,6 +391,7 @@ class TraderAgent(QThread):
             dec_score = compute_decision_score(scan_result, ai_rank, ai_research, alloc_pct)
             min_score = config.get("min_decision_score", 70.0)
             if dec_score < min_score:
+                self._log_step(f"{sym}: score {dec_score:.0f} < min {min_score:.0f} — rejected", "skip")
                 log_decision(sym, "REJECT", f"decision score {dec_score:.1f} < {min_score}",
                              scan_score=scan_result.total_score, decision_score=dec_score,
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
@@ -305,6 +407,7 @@ class TraderAgent(QThread):
                 config=config,
             )
             if dollars <= 0:
+                self._log_step(f"{sym}: insufficient cash after reserve — rejected", "skip")
                 log_decision(sym, "REJECT", "insufficient cash after reserve for minimum size",
                              scan_score=scan_result.total_score, decision_score=dec_score,
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
@@ -322,7 +425,9 @@ class TraderAgent(QThread):
 
             if config.get("dry_run", True):
                 _log.info("DRY-RUN BUY %s $%.0f (score=%.1f) — no order placed", sym, dollars, dec_score)
+                self._log_step(f"DRY-RUN BUY {sym} ${dollars:,.0f} (score {dec_score:.0f}) — no order placed", "trade")
                 self.agent_status.emit(f"Trader: dry-run BUY {sym} ${dollars:.0f}")
+                entries_made += 1
                 continue
 
             # 4. Execute
@@ -333,13 +438,15 @@ class TraderAgent(QThread):
                 trailing_stop_pct=trail_pct, cycle_id=cycle_id,
             )
             if success:
+                self._log_step(f"BUY {sym} ${dollars:,.0f} placed (rank #{ai_rank}, score {dec_score:.0f})", "trade")
                 open_symbols.append(sym)
                 cash -= dollars
                 entries_made += 1
 
-        self.agent_status.emit(
-            f"Trader: scan cycle done — {entries_made} entr{'y' if entries_made == 1 else 'ies'} placed"
-        )
+        summary = f"Scan cycle complete — {entries_made} entr{'y' if entries_made == 1 else 'ies'} placed"
+        self.agent_status.emit(f"Trader: {summary}")
+        self._log_step(summary)
+        self._write_agent_status()
 
     # ── Price-tick processing (exit logic) ────────────────────────────────────
 
@@ -401,6 +508,9 @@ class TraderAgent(QThread):
 
     def _heartbeat(self) -> None:
         config = load_trader_config()
+        et_time = market_clock.now_et().strftime("%H:%M ET")
+        self._log_step(f"Heartbeat — {et_time}")
+
         self._last_snapshot_date = maybe_snapshot(self._executor, self._last_snapshot_date)
 
         # Self-tuner: check if enough new trades have accumulated
@@ -409,14 +519,18 @@ class TraderAgent(QThread):
             fills = [e for e in read_journal(last_n=2000)
                      if e.get("type") == "fill" and e.get("side") == "SELL"]
             if should_tune(self._last_tune_count, len(fills)):
+                self._log_step(f"Self-tuner: {len(fills)} closed trades — running parameter adjustment")
                 self.agent_status.emit("Trader: self-tuning parameters…")
                 self._last_tune_count = run_tuning_cycle(self._last_tune_count)
+                self._log_step("Self-tuner: parameters updated")
         except Exception as exc:
             _log.warning("SelfTuner error: %s", exc)
 
         if not config.get("enabled", False):
+            self._write_agent_status()
             return
         if not market_clock.is_rth():
+            self._write_agent_status()
             return
 
         try:
@@ -424,7 +538,9 @@ class TraderAgent(QThread):
             nav     = account["equity"]
             if nav > self._ath_nav:
                 self._ath_nav = nav
+            self._log_step(f"NAV: ${nav:,.0f} (ATH: ${self._ath_nav:,.0f})")
         except Exception:
+            self._write_agent_status()
             return
 
         # Partial target exits
@@ -444,11 +560,13 @@ class TraderAgent(QThread):
                 continue
             # Target hit — sell half, move stop to breakeven
             _log.info("Heartbeat: target hit for %s @ $%.2f — partial exit", sym, price)
+            self._log_step(f"Target hit: {sym} @ ${price:.2f} (target ${meta.target_price:.2f}) — partial exit queued", "trade")
             if not config.get("dry_run", True):
                 self._execute_partial_exit(sym, meta, price)
 
         # News surge detection for open positions
         self._check_position_news(meta_all)
+        self._write_agent_status()
 
         # IV snapshot — builds history for IVR computation (Phase 2 options)
         try:
@@ -487,6 +605,7 @@ class TraderAgent(QThread):
                     titles = "; ".join(n.get("title", "")[:60] for n in recent[:3])
                     _log.warning("NEWS SURGE %s: %d articles in last hour — %s",
                                  sym, len(recent), titles)
+                    self._log_step(f"News surge: {sym} ({len(recent)} articles in 1h) — /aiscan recommended", "warn")
                     self.agent_status.emit(
                         f"News surge on {sym} ({len(recent)} articles) — consider /aiscan {sym}"
                     )

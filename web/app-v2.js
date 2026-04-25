@@ -22,6 +22,7 @@ const state = {
   historyIndex: null,
   historySnaps: {},
   sortState: {},   // { tableId: { col: "total_score", dir: -1 } }
+  agentStatus: null,
 };
 
 // ── Write API ─────────────────────────────────────────────────────────────
@@ -389,6 +390,7 @@ function renderAll() {
   renderAlerts();
   renderAIResearch();
   renderHistory();
+  renderAgentStatus();
 }
 
 // ── Top Picks ──────────────────────────────────────────────────────────────
@@ -720,6 +722,73 @@ async function renderHistory() {
   }
 }
 
+// ── Agent Status ───────────────────────────────────────────────────────────
+
+async function refreshAgentStatus() {
+  try {
+    const data = await fetchJSON(`${DATA_BASE}/agent_status.json`);
+    state.agentStatus = data;
+    renderAgentStatus();
+  } catch (_) {
+    // agent_status.json may not exist yet — fail silently, keep old state
+  }
+}
+
+function renderAgentStatus() {
+  const el = document.getElementById("panel-agent");
+  if (!el) return;
+  const data = state.agentStatus;
+
+  if (!data) {
+    el.innerHTML = '<div class="empty-state">No agent status yet — agent_status.json not found.<br>Start the desktop app with trader enabled.</div>';
+    return;
+  }
+
+  const ageMin = data.last_updated_utc
+    ? Math.floor((Date.now() - new Date(data.last_updated_utc).getTime()) / 60000)
+    : 9999;
+  const healthCls = ageMin < 20 ? "agent-health-ok" : ageMin < 60 ? "agent-health-warn" : "agent-health-dead";
+  const healthLabel = ageMin < 20 ? "LIVE" : ageMin < 60 ? "STALE" : "OFFLINE";
+  const cbBadge = data.circuit_breaker_active
+    ? '<span class="chip chip-red" style="font-size:13px">CIRCUIT BREAKER ACTIVE</span>'
+    : "";
+
+  let html = `<div class="card">
+    <div class="card-title">Trader Agent</div>
+    <div class="agent-header">
+      <span class="agent-health ${healthCls}">${healthLabel}</span>
+      <span class="agent-status-text">${escHtml(data.status_text || "")}</span>
+      ${cbBadge}
+    </div>
+    <div class="agent-meta">
+      <span>Positions: <b>${data.positions_count ?? "—"}</b></span>
+      &nbsp;·&nbsp;
+      <span>ATH NAV: <b>${data.ath_nav != null ? "$" + data.ath_nav.toLocaleString(undefined, {maximumFractionDigits:0}) : "—"}</b></span>
+      &nbsp;·&nbsp;
+      <span>Updated: <b>${relativeTime(data.last_updated_utc)}</b></span>
+    </div>
+  </div>`;
+
+  const steps = (data.steps || []).slice().reverse();
+  if (steps.length) {
+    html += `<div class="card"><div class="card-title">Activity Log</div><div class="agent-steps">`;
+    steps.forEach(s => {
+      const dot = { ok: "step-ok", warn: "step-warn", error: "step-error", skip: "step-skip", trade: "step-trade" }[s.status] || "step-ok";
+      const time = s.utc ? new Date(s.utc).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+      html += `<div class="agent-step">
+        <span class="step-dot ${dot}"></span>
+        <span class="step-time">${time}</span>
+        <span class="step-text">${escHtml(s.text)}</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  } else {
+    html += `<div class="card"><div class="empty-state" style="padding:20px 0">No activity logged yet.</div></div>`;
+  }
+
+  el.innerHTML = html;
+}
+
 // ── Error UI ───────────────────────────────────────────────────────────────
 
 function showError(msg) {
@@ -789,6 +858,16 @@ function playTransition(callback) {
   }
 }
 
+let _agentStatusTimer = null;
+
+function scheduleAgentStatusRefresh() {
+  if (_agentStatusTimer) clearTimeout(_agentStatusTimer);
+  _agentStatusTimer = setTimeout(async () => {
+    await refreshAgentStatus();
+    scheduleAgentStatusRefresh();
+  }, 60_000);
+}
+
 function showLoadingTransition() {
   const discScreen = document.getElementById("disclaimer-screen");
   if (discScreen) {
@@ -796,6 +875,7 @@ function showLoadingTransition() {
   }
   playTransition(() => {
     scheduleRefresh();
+    refreshAgentStatus().then(scheduleAgentStatusRefresh);
   });
 }
 

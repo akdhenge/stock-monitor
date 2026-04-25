@@ -497,6 +497,81 @@ td:nth-child(2) b {
       rgba(0, 0, 0, 0.5) 4px);
 }
 
+/* ── Agent Status Panel ── */
+.agent-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-health {
+  font-family: var(--font-brand);
+  font-size: 10px;
+  padding: 4px 10px;
+  border: 2px solid currentColor;
+  letter-spacing: 1px;
+}
+.agent-health-ok   { color: var(--green); }
+.agent-health-warn { color: #f59e0b; }
+.agent-health-dead { color: var(--red); }
+
+.agent-status-text {
+  color: var(--accent);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+
+.agent-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.agent-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.agent-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.step-ok    { background: var(--green); }
+.step-warn  { background: #f59e0b; }
+.step-error { background: var(--red); }
+.step-skip  { background: var(--muted); }
+.step-trade { background: #3b82f6; }
+
+.step-time {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 72px;
+}
+
+.step-text {
+  color: #ccc;
+  word-break: break-word;
+}
+
 /* ── Chips ── */
 .chip {
   display: inline-block;

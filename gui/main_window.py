@@ -20,6 +20,7 @@ from core.price_poller import PricePoller
 from core.scan_result import ScanResult
 from core.scan_results_store import load_scan_results, save_scan_results
 from core.settings_store import load_settings
+from core.market_clock import is_rth
 from core.stock_scanner import StockScanner
 from core.ticker_lookup import TickerLookupWorker
 from core.watchlist_store import get_watchlist_store, load_watchlist, save_watchlist
@@ -62,6 +63,8 @@ class MainWindow(QMainWindow):
         # Scheduler state
         self._last_deep_scan_dt: Optional[datetime] = None
         self._last_complete_scan_hhmm: str = ""   # prevents double-fire within same minute
+        self._last_trader_scan_hhmm: str = ""
+        self._last_trader_scan_date: str = ""
 
         # Daily summary tracking (resets on app restart or date rollover)
         self._complete_summary_sent_date: Optional[str] = None
@@ -420,14 +423,35 @@ class MainWindow(QMainWindow):
                 self._last_deep_scan_dt = now
                 self._trigger_deep_scan()
 
-        # Complete scan — at configured times
-        if self._settings.get("scanner_complete_scan_enabled"):
+        # Complete scan — at configured times (skipped when trader agent owns its own schedule)
+        from core.portfolio import load_trader_config
+        trader_owns_scans = (
+            self._trader_agent is not None
+            and load_trader_config().get("enabled", False)
+            and bool(load_trader_config().get("trader_scan_times_et"))
+        )
+        if self._settings.get("scanner_complete_scan_enabled") and not trader_owns_scans:
             times_str = self._settings.get("scanner_complete_scan_times_et", "")
             times = [t.strip() for t in times_str.split(",") if t.strip()]
             if current_hhmm in times and current_hhmm != self._last_complete_scan_hhmm:
                 self._last_complete_scan_hhmm = current_hhmm
                 if self._scanner is None or not self._scanner.isRunning():
                     self._trigger_complete_scan()
+
+        # Trader-agent autonomous scan schedule (independent of user scan settings)
+        if self._trader_agent is not None:
+            from core.portfolio import load_trader_config
+            trader_cfg = load_trader_config()
+            if trader_cfg.get("enabled", False) and is_rth():
+                today_str = now.strftime("%Y-%m-%d")
+                if self._last_trader_scan_date != today_str:
+                    self._last_trader_scan_date = today_str
+                    self._last_trader_scan_hhmm = ""
+                trader_times = [t.strip() for t in trader_cfg.get("trader_scan_times_et", []) if t.strip()]
+                if current_hhmm in trader_times and current_hhmm != self._last_trader_scan_hhmm:
+                    self._last_trader_scan_hhmm = current_hhmm
+                    if self._scanner is None or not self._scanner.isRunning():
+                        self._trigger_complete_scan()
 
     def _load_saved_scan_results(self) -> None:
         results = load_scan_results()

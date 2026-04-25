@@ -37,6 +37,7 @@ _CONFIG_DEFAULTS: Dict = {
     "max_position_age_days":  20,
     "vix_halt_threshold":     30.0,
     "earnings_block_days":    3,
+    "trader_scan_times_et":   ["09:35", "10:30", "12:00", "14:00", "15:30"],
 }
 
 
