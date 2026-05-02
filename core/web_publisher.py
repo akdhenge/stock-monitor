@@ -198,7 +198,7 @@ class WebPublisher(QThread):
             import boto3
             from botocore.config import Config
         except ImportError:
-            return "boto3 not installed — run: py -3.9 -m pip install boto3"
+            return "boto3 not installed — run: py -3.12 -m pip install boto3"
 
         try:
             s3 = boto3.client(
@@ -250,7 +250,7 @@ class WebPublisher(QThread):
             import boto3
             from botocore.config import Config
         except ImportError:
-            return False, "boto3 not installed — run: py -3.9 -m pip install boto3"
+            return False, "boto3 not installed — run: py -3.12 -m pip install boto3"
         try:
             s3 = boto3.client(
                 "s3",

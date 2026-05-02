@@ -1,5 +1,9 @@
 import sys
 import os
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="boto3")
+warnings.filterwarnings("ignore", message=".*Boto3 will no longer support Python 3.9.*")
 
 # Ensure the project root is on sys.path so all imports work regardless of CWD
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -74,96 +74,156 @@ def check_hard_gates(
     return True, ""
 
 
-def compute_decision_score(
+def compute_conviction_score(
     scan_result,
-    ai_rank: Optional[int],            # 1–10 from ClaudeRankingAnalyst; None = not ranked
+    ai_rank: Optional[int],
     ai_research: Optional[dict],
-    allocation_pct: Optional[float],   # from ClaudeRankingAnalyst
-) -> float:
+    ranker_allocation_pct: Optional[float],
+) -> Tuple[float, Dict[str, float]]:
     """
-    Composite 0–100 score combining scan quality, AI rank, and sentiment signals.
-    Threshold is config['min_decision_score'] (default 70).
+    Unified conviction score (0–100) that drives both the invest/pass gate
+    and position sizing.  Returns (score, breakdown_dict) for explainability.
+
+    Components
+    ----------
+    scan quality    35 pts  — total_score / 100 * 35
+    AI rank         20 pts  — rank 1→20, rank 10→2, unranked→8
+    ranker alloc    15 pts  — ranker's allocation hint (0–25%) scaled to 0–15
+    sentiment       12 pts  — BULLISH=12, NEUTRAL=6, BEARISH=0
+    direction        6 pts  — UP=6, SIDEWAYS=2, DOWN=0
+    technicals      12 pts  — macd=4, rsi<40=4, volume_spike=4
     """
-    score = 0.0
+    breakdown: Dict[str, float] = {}
 
-    # 40% from scan total score
-    score += scan_result.total_score * 0.40
+    # 35% scan quality
+    scan_pts = round(scan_result.total_score * 0.35, 2)
+    breakdown["scan"] = scan_pts
 
-    # 25% from AI portfolio rank (rank 1 → 25 pts, rank 10 → 2.5 pts)
+    # 20% AI rank
     if ai_rank is not None:
-        rank_pts = max(0, (11 - ai_rank) / 10 * 25)
-        score += rank_pts
+        rank_pts = round(max(0.0, (11 - ai_rank) / 10 * 20), 2)
     else:
-        score += 10.0  # neutral if not ranked yet
+        rank_pts = 8.0
+    breakdown["rank"] = rank_pts
 
-    # 20% from AI research signals
+    # 15% ranker allocation hint  (ranker says "give this 22%" → strong conviction)
+    if ranker_allocation_pct is not None:
+        alloc_pts = round(min(ranker_allocation_pct, 25) / 25 * 15, 2)
+    else:
+        alloc_pts = 5.0
+    breakdown["ranker_alloc"] = alloc_pts
+
+    # 12% sentiment
+    sent = ""
     if ai_research:
         sent = ai_research.get("sentiment", "NEUTRAL").upper()
-        if sent == "BULLISH":
-            score += 14
-        elif sent == "NEUTRAL":
-            score += 7
+    sent_pts = {"BULLISH": 12, "NEUTRAL": 6, "BEARISH": 0}.get(sent, 6)
+    breakdown["sentiment"] = float(sent_pts)
 
+    # 6% direction
+    dirn_pts = 2.0
+    if ai_research:
         dirn = ai_research.get("direction", "SIDEWAYS").upper()
-        if dirn == "UP":
-            score += 6
+        dirn_pts = {"UP": 6.0, "SIDEWAYS": 2.0, "DOWN": 0.0}.get(dirn, 2.0)
+    breakdown["direction"] = dirn_pts
 
-    # 15% from technical confirmations
+    # 12% technicals
     tech_pts = 0.0
     if scan_result.macd_bullish:
-        tech_pts += 5
+        tech_pts += 4
     if scan_result.rsi and scan_result.rsi < 40:
-        tech_pts += 5
+        tech_pts += 4
     if scan_result.volume_spike:
-        tech_pts += 5
-    score += tech_pts
+        tech_pts += 4
+    breakdown["tech"] = tech_pts
 
-    return min(round(score, 2), 100.0)
+    total = min(round(
+        scan_pts + rank_pts + alloc_pts + sent_pts + dirn_pts + tech_pts, 2
+    ), 100.0)
+    return total, breakdown
+
+
+def compute_decision_score(
+    scan_result,
+    ai_rank: Optional[int],
+    ai_research: Optional[dict],
+    allocation_pct: Optional[float],
+) -> float:
+    """Backward-compat shim — delegates to compute_conviction_score."""
+    score, _ = compute_conviction_score(scan_result, ai_rank, ai_research, allocation_pct)
+    return score
+
+
+_REGIME_SIZE_MULT: Dict[str, float] = {"bull": 1.0, "neutral": 0.85, "bear": 0.65}
 
 
 def size_position(
-    decision_score: float,
-    allocation_pct: Optional[float],  # hint from ClaudeRankingAnalyst (0–20)
-    volatility: Optional[float],      # annualized vol (0.3 = 30%)
+    conviction_score: float,
+    effective_min_conviction: float,
+    volatility: Optional[float],
+    regime_label: str,
     nav: float,
     cash: float,
     config: dict,
-) -> float:
+) -> Tuple[float, Dict[str, float]]:
     """
-    Return the dollar amount to deploy, respecting max_position_pct and cash_reserve.
-    Uses allocation_pct as a hint then adjusts for volatility.
+    Return (dollars_to_deploy, breakdown_dict).
+
+    Sizing curve: concave ramp anchored at the gate.
+        t = (conviction - gate) / span,  clipped [0, 1]
+        base_pct = min_pct + (max_pct - min_pct) * t^0.7
+
+    Concrete examples (gate=55, bull):
+        conviction 55 → 2.0%   ($2 000)
+        conviction 70 → ~4.5%  ($4 500)
+        conviction 85 → ~6.5%  ($6 500)
+        conviction 100→  8.0%  ($8 000)
+
+    Adjustments applied after the curve:
+        * volatility factor  — high-vol stocks sized smaller
+        * regime multiplier  — bear 0.65×, neutral 0.85×, bull 1.0×
     """
     max_pct   = config.get("max_position_pct", 0.08)
     min_pct   = config.get("min_position_pct", 0.02)
     reserve   = nav * config.get("cash_reserve_pct", 0.10)
     available = cash - reserve
+    min_order = nav * min_pct
 
-    # Base from ClaudeRankingAnalyst's allocation suggestion (it gives 5–25 for top-5)
-    if allocation_pct is not None:
-        base_pct = min(allocation_pct / 100.0, max_pct)
-    else:
-        # Scale by decision score: score 70 → min_pct, score 100 → max_pct
-        t = max(0, (decision_score - 70) / 30)
-        base_pct = min_pct + t * (max_pct - min_pct)
+    breakdown: Dict[str, float] = {}
 
-    # Volatility adjustment: high vol stocks get smaller allocation
-    if volatility is not None and volatility > 0:
-        # Target vol = 0.25 (25% annualized). If stock is more volatile, scale down.
+    if available < min_order:
+        return 0.0, {"reason": "insufficient cash after reserve"}
+
+    # Conviction curve
+    gate = effective_min_conviction
+    span = max(20.0, 100.0 - gate)
+    t    = min(1.0, max(0.0, (conviction_score - gate) / span))
+    base_pct = min_pct + (max_pct - min_pct) * (t ** 0.7)
+    breakdown["base_pct"] = round(base_pct, 4)
+
+    # Volatility factor
+    vol_factor = 1.0
+    if volatility and volatility > 0:
         target_vol = 0.25
         vol_factor = min(target_vol / volatility, 1.0)
-        vol_factor = max(vol_factor, 0.5)  # floor at 50% — don't zero out
-        base_pct *= vol_factor
+        vol_factor = max(vol_factor, 0.5)
+    breakdown["vol_factor"] = round(vol_factor, 3)
 
-    min_order = nav * min_pct
-    if available < min_order:
-        return 0.0  # not enough free cash — caller skips the trade
+    # Regime multiplier
+    regime_mult = _REGIME_SIZE_MULT.get(regime_label, 1.0)
+    breakdown["regime_mult"] = regime_mult
 
-    dollars = nav * base_pct
+    final_pct = base_pct * vol_factor * regime_mult
+    breakdown["final_pct"] = round(final_pct, 4)
+
+    dollars = nav * final_pct
     dollars = min(dollars, available)
-    dollars = max(dollars, min_order)
-    dollars = min(dollars, nav * max_pct)
+    dollars = max(dollars, min_order)           # floor at min position
+    dollars = min(dollars, nav * max_pct)       # hard cap at max position
+    dollars = round(dollars, 2)
+    breakdown["dollars"] = dollars
 
-    return round(dollars, 2)
+    return dollars, breakdown
 
 
 # ── Exit checks ────────────────────────────────────────────────────────────────

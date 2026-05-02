@@ -38,7 +38,7 @@ from core.portfolio import (
 )
 from core.risk_manager import (
     check_circuit_breaker, check_exit, check_hard_gates,
-    compute_decision_score, compute_sector_exposure, size_position,
+    compute_conviction_score, compute_decision_score, compute_sector_exposure, size_position,
 )
 from core.trade_journal import log_decision, log_fill
 from core.performance_tracker import maybe_snapshot
@@ -238,43 +238,73 @@ class TraderAgent(QThread):
         self._log_step(f"Scan received — {len(results)} stocks to evaluate")
         cycle_id = str(uuid.uuid4())[:8]
 
-        # VIX gate — halt new entries if market fear is elevated
-        vix_threshold = config.get("vix_halt_threshold", 30.0)
-        try:
-            import yfinance as yf
-            vix = yf.Ticker("^VIX").fast_info.last_price
-            if vix and float(vix) > vix_threshold:
-                _log.info("TraderAgent: VIX %.1f > %.0f threshold — skipping entries this cycle",
-                          float(vix), vix_threshold)
-                self._log_step(f"VIX: {float(vix):.1f} > {vix_threshold:.0f} — entries paused (high fear)", "warn")
-                self.agent_status.emit(f"Trader: VIX {float(vix):.1f} > {vix_threshold:.0f} — entries paused")
-                self._write_agent_status()
-                return
-            elif vix:
-                self._log_step(f"VIX: {float(vix):.1f} — market fear low, entries enabled")
-        except Exception:
-            pass  # if VIX fetch fails, proceed normally
+        # Fetch VIX + SPY once — used for both regime detection and existing gates
+        import yfinance as yf
+        from core.market_regime import detect_regime, format_regime_log
 
-        # SPY regime — halve position sizes when SPY is below its 200-DMA
-        spy_regime_factor = 1.0
+        vix_val  = None
+        spy_hist = None
         try:
-            import yfinance as yf
+            vix_val  = float(yf.Ticker("^VIX").fast_info.last_price or 20.0)
             spy_hist = yf.Ticker("SPY").history(period="1y", interval="1d")
-            if len(spy_hist) >= 200:
-                sma200    = float(spy_hist["Close"].tail(200).mean())
-                spy_price = float(spy_hist["Close"].iloc[-1])
-                if spy_price < sma200:
-                    spy_regime_factor = 0.5
-                    _log.info("TraderAgent: SPY $%.2f < 200-DMA $%.2f — half-size mode",
-                              spy_price, sma200)
-                    self._log_step(f"SPY: ${spy_price:.0f} < 200-DMA ${sma200:.0f} — half-size mode active", "warn")
-                    self.agent_status.emit(
-                        f"Trader: SPY ${spy_price:.0f} < 200-DMA ${sma200:.0f} — half-size entries"
-                    )
-                else:
-                    self._log_step(f"SPY: ${spy_price:.0f} above 200-DMA ${sma200:.0f} — full size")
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("TraderAgent: VIX/SPY fetch failed: %s", exc)
+
+        # VIX halt gate
+        vix_threshold = config.get("vix_halt_threshold", 30.0)
+        if vix_val and vix_val > vix_threshold:
+            _log.info("TraderAgent: VIX %.1f > %.0f — skipping entries", vix_val, vix_threshold)
+            self._log_step(f"VIX: {vix_val:.1f} > {vix_threshold:.0f} — entries paused (high fear)", "warn")
+            self.agent_status.emit(f"Trader: VIX {vix_val:.1f} > {vix_threshold:.0f} — entries paused")
+            self._write_agent_status()
+            return
+        elif vix_val:
+            self._log_step(f"VIX: {vix_val:.1f}")
+
+        # Detect market regime — drives thresholds + candidate pool size
+        regime = detect_regime(spy_hist, vix_val)
+        self._log_step(format_regime_log(regime))
+        self.agent_status.emit(f"Trader: regime {regime.label.upper()} — evaluating…")
+
+        # Build effective config with regime-adjusted thresholds
+        effective_config = dict(config)
+        effective_config["min_scan_score"]     = regime.min_scan_score
+        effective_config["min_decision_score"] = regime.min_decision_score
+
+        # Adaptive threshold: replace fixed regime gate with percentile-based one
+        from core.score_history import (
+            load_history, append_scan_results, compute_adaptive_threshold,
+            compute_adaptive_decision_threshold, append_decision_score,
+            save_history as save_score_history, check_per_symbol_quality,
+        )
+        from core.risk_manager import _REGIME_SIZE_MULT
+        from core.history_store import log_decision as hist_log_decision, log_debate as hist_log_debate
+        _score_hist = load_history()
+        append_scan_results(_score_hist, results, regime.label)
+        _adaptive = compute_adaptive_threshold(_score_hist, regime, config)
+        _decision_adaptive = compute_adaptive_decision_threshold(_score_hist, regime, config)
+        save_score_history(_score_hist)
+        effective_config["min_scan_score"]     = _adaptive["effective_min_scan_score"]
+        effective_config["min_decision_score"] = _decision_adaptive["effective_min_decision_score"]
+        _regime_size_mult = _REGIME_SIZE_MULT.get(regime.label, 1.0)
+        self._log_step(
+            f"Adaptive scan gate: >={_adaptive['effective_min_scan_score']:.1f} "
+            f"(p{_adaptive['percentile_used']} / {_adaptive['n_samples']}s, mode={_adaptive['mode']})"
+        )
+        self._log_step(
+            f"Adaptive conviction gate: >={_decision_adaptive['effective_min_decision_score']:.1f} "
+            f"(p{_decision_adaptive['percentile_used']} / {_decision_adaptive['n_samples']}s, "
+            f"mode={_decision_adaptive['mode']}) | regime size mult={_regime_size_mult}"
+        )
+
+        # SPY position-size factor (unchanged: halve sizes when below 200d MA)
+        spy_regime_factor = 1.0
+        if spy_hist is not None and len(spy_hist) >= 200:
+            sma200    = float(spy_hist["Close"].tail(200).mean())
+            spy_price = float(spy_hist["Close"].iloc[-1])
+            if spy_price < sma200:
+                spy_regime_factor = 0.5
+                self._log_step(f"SPY: ${spy_price:.0f} < 200d ${sma200:.0f} — half-size mode", "warn")
 
         try:
             account = self._executor.get_account()
@@ -332,11 +362,14 @@ class TraderAgent(QThread):
         # Build a lookup of scan results by symbol
         scan_by_symbol = {r.symbol: r for r in results if hasattr(r, "symbol")}
 
-        # Evaluate ranked candidates (top 5 only — they have allocation_pct)
-        ranked = ranked_list
+        # Candidate pool size is regime-dependent: bear/neutral opens more candidates
+        # so the debate filter can select the genuinely tradeable ones.
+        max_candidates = regime.max_candidates
+        self._log_step(f"Evaluating top {max_candidates} ranked candidates (regime: {regime.label})")
+        settings = self._get_settings()
         entries_made = 0
 
-        for ranked_item in ranked[:5]:
+        for ranked_item in ranked_list[:max_candidates]:
             if not self._running:
                 break
 
@@ -369,7 +402,7 @@ class TraderAgent(QThread):
             stop_pct     = config.get("default_stop_loss_pct", 0.08)
             trail_pct    = config.get("default_trailing_stop_pct", 0.12)
 
-            # 1. Hard gates
+            # 1. Hard gates (regime-adjusted min_scan_score applied via effective_config)
             passed, reject_reason = check_hard_gates(
                 symbol=sym,
                 scan_result=scan_result,
@@ -378,7 +411,7 @@ class TraderAgent(QThread):
                 sector_exposure=sector_exposure,
                 cash=cash,
                 nav=nav,
-                config=config,
+                config=effective_config,
             )
             if not passed:
                 self._log_step(f"{sym}: rejected — {reject_reason}", "skip")
@@ -387,29 +420,65 @@ class TraderAgent(QThread):
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
                 continue
 
-            # 2. Decision score
-            dec_score = compute_decision_score(scan_result, ai_rank, ai_research, alloc_pct)
-            min_score = config.get("min_decision_score", 70.0)
-            if dec_score < min_score:
-                self._log_step(f"{sym}: score {dec_score:.0f} < min {min_score:.0f} — rejected", "skip")
-                log_decision(sym, "REJECT", f"decision score {dec_score:.1f} < {min_score}",
-                             scan_score=scan_result.total_score, decision_score=dec_score,
+            # 1b. Per-symbol quality gate (soft: score must be near 30d mean)
+            sym_ok, sym_reason = check_per_symbol_quality(sym, scan_result.total_score, _score_hist)
+            if not sym_ok:
+                self._log_step(f"{sym}: per-symbol gate — {sym_reason}", "skip")
+                log_decision(sym, "REJECT", sym_reason,
+                             scan_score=scan_result.total_score,
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
                 continue
 
-            # 3. Size position
-            dollars = size_position(
-                decision_score=dec_score,
-                allocation_pct=alloc_pct,
+            # 2. Conviction score — gates entry AND drives sizing
+            ai_sentiment = (ai_research or {}).get("sentiment", "")
+            conviction, cv_breakdown = compute_conviction_score(
+                scan_result, ai_rank, ai_research, alloc_pct
+            )
+            min_conviction = effective_config.get("min_decision_score", 55.0)
+            append_decision_score(
+                _score_hist, sym, conviction, regime.label,
+                passed_gate=(conviction >= min_conviction),
+                scan_score=scan_result.total_score,
+                ai_rank=ai_rank, sentiment=ai_sentiment,
+            )
+            try:
+                hist_log_decision(
+                    symbol=sym, conviction=conviction,
+                    conviction_gate=min_conviction, breakdown=cv_breakdown,
+                    scan_score=scan_result.total_score,
+                    scan_gate=effective_config["min_scan_score"],
+                    regime_label=regime.label, ai_rank=ai_rank,
+                    sentiment=ai_sentiment,
+                    passed=(conviction >= min_conviction),
+                )
+            except Exception:
+                pass
+            if conviction < min_conviction:
+                self._log_step(
+                    f"{sym}: conviction {conviction:.1f} < gate {min_conviction:.1f} — rejected "
+                    f"[scan={cv_breakdown.get('scan',0):.1f} rank={cv_breakdown.get('rank',0):.1f} "
+                    f"alloc={cv_breakdown.get('ranker_alloc',0):.1f} sent={cv_breakdown.get('sentiment',0):.0f} "
+                    f"tech={cv_breakdown.get('tech',0):.0f}]", "skip"
+                )
+                log_decision(sym, "REJECT", f"conviction {conviction:.1f} < gate {min_conviction:.1f}",
+                             scan_score=scan_result.total_score, decision_score=conviction,
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                continue
+
+            # 3. Size position (conviction-driven curve + regime multiplier)
+            dollars, size_breakdown = size_position(
+                conviction_score=conviction,
+                effective_min_conviction=min_conviction,
                 volatility=scan_result.volatility_20d,
+                regime_label=regime.label,
                 nav=nav,
                 cash=cash,
-                config=config,
+                config=effective_config,
             )
             if dollars <= 0:
                 self._log_step(f"{sym}: insufficient cash after reserve — rejected", "skip")
                 log_decision(sym, "REJECT", "insufficient cash after reserve for minimum size",
-                             scan_score=scan_result.total_score, decision_score=dec_score,
+                             scan_score=scan_result.total_score, decision_score=conviction,
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
                 continue
 
@@ -417,11 +486,51 @@ class TraderAgent(QThread):
                 dollars = round(dollars * spy_regime_factor, 2)
 
             thesis = self._build_thesis(sym, ai_research, ranked_item)
+            self._log_step(
+                f"{sym}: conviction={conviction:.1f} size={size_breakdown.get('final_pct',0)*100:.1f}% "
+                f"(base={size_breakdown.get('base_pct',0)*100:.1f}% "
+                f"vol={size_breakdown.get('vol_factor',1):.2f}x "
+                f"regime={size_breakdown.get('regime_mult',1):.2f}x) "
+                f"-> ${dollars:,.0f}"
+            )
             log_decision(sym, "BUY", "all gates passed",
-                         scan_score=scan_result.total_score, decision_score=dec_score,
+                         scan_score=scan_result.total_score, decision_score=conviction,
                          ai_rank=ai_rank, size_dollars=dollars, nav_at_eval=nav,
                          ai_sentiment=ai_research.get("sentiment") if ai_research else None,
                          cycle_id=cycle_id)
+
+            # 4. Bull/Bear debate — final check via Claude (regime-aware)
+            from core.trade_debate import run_debate
+            self._log_step(f"{sym}: sending to Claude debate ({regime.label} regime)...")
+            debate_ok, debate_verdict = run_debate(
+                symbol=sym,
+                scan_result=scan_result,
+                ai_research=ai_research,
+                claude_rationale=ranked_item.get("rationale", ""),
+                decision_score=conviction,
+                regime=regime.label,
+                settings=settings,
+            )
+            _debate_verdict_str = "BUY" if debate_ok else "PASS"
+            try:
+                hist_log_debate(
+                    symbol=sym, conviction=conviction,
+                    verdict=_debate_verdict_str, reasoning=debate_verdict,
+                    regime_label=regime.label,
+                    model=settings.get("debate_model", "claude-sonnet-4-6"),
+                    cost_usd=0.0,
+                    price_at_eval=scan_result.price,
+                )
+            except Exception:
+                pass
+
+            if not debate_ok:
+                self._log_step(f"{sym}: debate PASS -- {debate_verdict[:80]}", "skip")
+                log_decision(sym, "REJECT", f"debate: {debate_verdict[:120]}",
+                             scan_score=scan_result.total_score, decision_score=conviction,
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                continue
+            self._log_step(f"{sym}: debate BUY -- {debate_verdict[:80]}")
 
             if config.get("dry_run", True):
                 _log.info("DRY-RUN BUY %s $%.0f (score=%.1f) — no order placed", sym, dollars, dec_score)
@@ -430,7 +539,7 @@ class TraderAgent(QThread):
                 entries_made += 1
                 continue
 
-            # 4. Execute
+            # 5. Execute
             success = self._execute_entry(
                 symbol=sym, dollars=dollars, current_price=scan_result.price,
                 scan_result=scan_result, ai_rank=ai_rank, thesis=thesis,
@@ -443,7 +552,17 @@ class TraderAgent(QThread):
                 cash -= dollars
                 entries_made += 1
 
+        # Persist history with newly appended decision scores
+        save_score_history(_score_hist)
+
         summary = f"Scan cycle complete — {entries_made} entr{'y' if entries_made == 1 else 'ies'} placed"
+        try:
+            from core.ticker_memory import get_rolling_alpha
+            alpha = get_rolling_alpha(n_trades=10)
+            if alpha is not None:
+                summary += f" | rolling alpha vs SPY: {alpha:+.1f}%"
+        except Exception:
+            pass
         self.agent_status.emit(f"Trader: {summary}")
         self._log_step(summary)
         self._write_agent_status()
@@ -538,7 +657,13 @@ class TraderAgent(QThread):
             nav     = account["equity"]
             if nav > self._ath_nav:
                 self._ath_nav = nav
-            self._log_step(f"NAV: ${nav:,.0f} (ATH: ${self._ath_nav:,.0f})")
+            try:
+                from core.ticker_memory import get_rolling_alpha
+                alpha = get_rolling_alpha(n_trades=10)
+                alpha_str = f" | rolling alpha: {alpha:+.1f}%" if alpha is not None else ""
+            except Exception:
+                alpha_str = ""
+            self._log_step(f"NAV: ${nav:,.0f} (ATH: ${self._ath_nav:,.0f}){alpha_str}")
         except Exception:
             self._write_agent_status()
             return
@@ -577,6 +702,14 @@ class TraderAgent(QThread):
                     update_iv_snapshot(sym, iv)
         except Exception as exc:
             _log.debug("IV snapshot error: %s", exc)
+
+        # Outcome tracking — check debate calls from N days ago
+        try:
+            from core.history_store import check_and_log_outcomes
+            for _horizon in (5, 10, 20):
+                check_and_log_outcomes(days_back=_horizon)
+        except Exception as exc:
+            _log.debug("Outcome tracking error: %s", exc)
 
     # ── Market intelligence helpers ───────────────────────────────────────────
 
@@ -642,6 +775,9 @@ class TraderAgent(QThread):
         )
         save_position_meta(meta)
 
+        from core.ticker_memory import store_buy
+        store_buy(symbol, fill_price, thesis)
+
         log_fill(symbol=symbol, side="BUY", shares=fill_qty, fill_price=fill_price,
                  order_id=order_id, stop_loss=meta.stop_loss_price,
                  target=target_price, thesis=thesis, cycle_id=cycle_id)
@@ -674,6 +810,9 @@ class TraderAgent(QThread):
                  order_id=order_id, realized_pnl=realized, exit_reason=reason,
                  cycle_id=cycle_id)
         delete_position_meta(symbol)
+
+        from core.ticker_memory import finalize_outcome
+        finalize_outcome(symbol, fill_price, reason)
 
         msg = {
             "action":       "SELL",

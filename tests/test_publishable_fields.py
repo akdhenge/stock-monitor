@@ -1,6 +1,6 @@
 """
 Ensure that serialized publishable payloads never contain secret values.
-Run: py -3.9 -m unittest discover tests
+Run: py -3.12 -m unittest discover tests
 """
 import json
 import os

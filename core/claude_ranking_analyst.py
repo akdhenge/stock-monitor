@@ -122,6 +122,7 @@ class ClaudeRankingAnalyst(QThread):
     # ── Prompt builder ────────────────────────────────────────────────────────
 
     def _build_prompt(self, enriched: List[dict]) -> str:
+        from core.ticker_memory import get_past_context
         lines = [
             "You are a portfolio analyst. Below are up to 10 pre-screened stocks from a quantitative scan,",
             "each with fundamental data and (where available) individual AI research. Your tasks:",
@@ -160,6 +161,10 @@ class ClaudeRankingAnalyst(QThread):
                 lines.append(f"    Options strategy: {s['options_strategy']}")
             else:
                 lines.append("    (No individual AI research available — use fundamentals only)")
+            past = get_past_context(s["symbol"])
+            if past:
+                for mem_line in past.splitlines():
+                    lines.append(f"    {mem_line}")
 
         lines += [
             "",

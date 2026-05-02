@@ -126,6 +126,13 @@ def _compute_stats(fills: List[Dict]) -> Dict[str, Any]:
         reasons[r] = reasons.get(r, 0) + 1
     top_exits = sorted(reasons.items(), key=lambda x: -x[1])[:4]
 
+    rolling_alpha = None
+    try:
+        from core.ticker_memory import get_rolling_alpha
+        rolling_alpha = get_rolling_alpha(n_trades=10)
+    except Exception:
+        pass
+
     return {
         "n_trades":         len(fills),
         "win_rate_pct":     win_rate,
@@ -135,6 +142,7 @@ def _compute_stats(fills: List[Dict]) -> Dict[str, Any]:
         "avg_decision_score_wins":   avg_win_score,
         "avg_decision_score_losses": avg_loss_score,
         "top_exit_reasons": top_exits,
+        "rolling_alpha_vs_spy_pct":  rolling_alpha,
     }
 
 
@@ -160,6 +168,10 @@ RULES:
 - If avg_decision_score_wins > avg_decision_score_losses by >10pts: raise min_decision_score slightly
 - If most exits are "hard stop": stop_loss_pct may be too tight — consider loosening
 - If most exits are "time stop": max_position_age_days may be too short
+- rolling_alpha_vs_spy_pct is average alpha vs SPY per trade over the last 10 trades
+  - If negative (underperforming SPY) AND win_rate < 45%: raise min_decision_score by 2-3pts to be more selective
+  - If strongly positive (>5%) AND n_trades < 5 per week: consider lowering min_decision_score slightly to trade more
+  - NEVER lower min_decision_score below 60 or raise above 85
 
 Respond ONLY with a valid JSON object containing the parameters you want to change (omit unchanged params):
 {{"min_decision_score": 72.0, "default_stop_loss_pct": 0.09}}

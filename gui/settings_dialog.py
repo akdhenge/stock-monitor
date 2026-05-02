@@ -427,9 +427,9 @@ class SettingsDialog(QDialog):
         layout.addStretch()
 
         note = QLabel(
-            "Install boto3 for R2 upload: py -3.9 -m pip install boto3\n"
+            "Install boto3 for R2 upload: py -3.12 -m pip install boto3\n"
             "Without R2 credentials, publishing writes locally to data/web_publish/ only.\n"
-            "Local preview: py -3.9 -m http.server 8000  →  http://localhost:8000/web/"
+            "Local preview: py -3.12 -m http.server 8000  →  http://localhost:8000/web/"
         )
         note.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(note)

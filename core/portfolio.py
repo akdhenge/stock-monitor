@@ -31,13 +31,14 @@ _CONFIG_DEFAULTS: Dict = {
     "max_daily_loss_pct":     0.03,
     "max_drawdown_halt_pct":  0.15,
     "min_scan_score":         60.0,
-    "min_decision_score":     70.0,
+    "min_decision_score":     62.0,
     "min_price":              5.0,
     "min_avg_volume":         1_000_000,
     "max_position_age_days":  20,
     "vix_halt_threshold":     30.0,
     "earnings_block_days":    3,
     "trader_scan_times_et":   ["09:35", "10:30", "12:00", "14:00", "15:30"],
+    "debate_model":           "claude-sonnet-4-6",
 }
 
 
