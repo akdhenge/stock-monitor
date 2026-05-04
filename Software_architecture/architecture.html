@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stock Monitor — Architecture v2</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', sans-serif; background: #020617; min-height: 100vh; padding: 2rem; color: white; line-height: 1.5; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    
+    /* Header */
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; animation: pulse 2s infinite; box-shadow: 0 0 10px #22d3ee; }
+    @keyframes pulse { 0%,100%{opacity:1; box-shadow: 0 0 10px #22d3ee;} 50%{opacity:0.5; box-shadow: 0 0 2px #22d3ee;} }
+    h1 { font-family: 'JetBrains Mono', monospace; font-size: 1.75rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 1rem; margin-left: 1.75rem; }
+
+    /* Breadcrumb */
+    .breadcrumb { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 2rem; font-size: 0.85rem; flex-wrap: wrap; background: rgba(15,23,42,0.6); padding: 0.75rem 1rem; border-radius: 0.5rem; border: 1px solid #1e293b; }
+    .bc-item { color: #94a3b8; cursor: pointer; transition: color 0.2s; font-weight: 500; }
+    .bc-item:hover { color: #22d3ee; }
+    .bc-item.active { color: white; cursor: default; }
+    .bc-sep { color: #475569; }
+
+    /* Back button */
+    .back-btn { display: inline-flex; align-items: center; gap: 0.5rem; background: rgba(30,41,59,0.5); border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.5rem 1rem; font-size: 0.85rem; font-weight: 500; color: #cbd5e1; cursor: pointer; transition: all 0.2s; margin-bottom: 1.5rem; font-family: inherit; }
+    .back-btn:hover { background: rgba(30,41,59,0.8); color: white; border-color: #334155; transform: translateX(-2px); }
+
+    /* ── Interactive Diagram (Levels 0 & 1) ── */
+    .diagram-wrap { width: 100%; overflow-x: auto; margin-top: 1rem; padding-bottom: 1rem; }
+    .diagram-scene { position: relative; width: 1050px; height: 600px; background: rgba(15,23,42,0.4); border: 1px solid #1e293b; border-radius: 1rem; margin: 0 auto; backdrop-filter: blur(10px); background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px); background-size: 20px 20px; }
+    .conn-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+    
+    .tile { position: absolute; width: 200px; cursor: pointer; z-index: 10;
+      background: rgba(15,23,42,0.85); border: 1px solid #1e293b;
+      border-top-width: 4px; border-radius: 0.75rem; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3); backdrop-filter: blur(5px); }
+    .tile:hover { transform: translateY(-5px) scale(1.02); z-index: 20; box-shadow: 0 15px 30px rgba(0,0,0,0.5); }
+    .tile-head { display: flex; align-items: center; gap: 10px; padding: 12px; }
+    .tile-icon { font-size: 1.5rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }
+    .comp-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+    .tile-name { font-size: 0.95rem; font-weight: 700; color: #f8fafc; font-family: 'JetBrains Mono', monospace; line-height: 1.2; }
+    .tile-body { padding: 0 12px 12px; font-size: 0.8rem; color: #94a3b8; line-height: 1.4; }
+    
+    .tile.central { width: 240px; background: rgba(15,23,42,0.95); box-shadow: 0 0 40px rgba(34,211,238,0.1); }
+    .tile.central .tile-name { font-size: 1.1rem; }
+    
+    /* External system nodes for L1 */
+    .tile.external { background: rgba(30,41,59,0.3); border: 2px dashed #475569; border-top: 2px dashed #475569; box-shadow: none; cursor: default; }
+    .tile.external:hover { transform: none; box-shadow: none; }
+    .tile.external .tile-name { color: #94a3b8; }
+    .tile.external .tile-icon { filter: grayscale(100%); opacity: 0.7; }
+    .tile.external.clickable-ext { cursor: pointer; }
+    .tile.external.clickable-ext:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,0.3); border-color: #64748b; }
+    .tile.external.clickable-ext .tile-name { color: #cbd5e1; }
+    .tile.external.clickable-ext .tile-icon { filter: none; opacity: 1; }
+
+    .path-line { stroke-dasharray: 6; animation: dash 20s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset: -200; } }
+    
+    /* ── Subsystem Header ── */
+    .sys-header { background: rgba(15,23,42,0.6); border: 1px solid #1e293b; border-radius: 1rem; padding: 1.5rem 2rem; margin-bottom: 1.5rem; display: flex; align-items: flex-start; gap: 1.5rem; backdrop-filter: blur(10px); }
+    .sys-icon  { font-size: 3rem; flex-shrink: 0; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3)); }
+    .sys-title { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; font-family: 'JetBrains Mono', monospace; }
+    .sys-desc  { font-size: 0.95rem; color: #94a3b8; }
+
+    /* ── Level 2: Technical detail ── */
+    .tech-panel { background: rgba(15,23,42,0.6); border: 1px solid #1e293b; border-radius: 1rem; padding: 2rem; max-width: 900px; backdrop-filter: blur(10px); }
+    .tech-title    { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; font-family: 'JetBrains Mono', monospace; color: white; }
+    .tech-subtitle { font-size: 0.95rem; color: #94a3b8; margin-bottom: 2rem; }
+    .tech-sec      { margin-bottom: 1.5rem; }
+    .tech-sec-lbl  { font-size: 0.75rem; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #64748b; margin-bottom: 0.75rem; }
+    .tech-file     { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #22d3ee; background: rgba(34,211,238,0.1); border: 1px solid rgba(34,211,238,0.2); border-radius: 0.375rem; padding: 0.4rem 0.75rem; display: inline-block; }
+    .tech-class    { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #a78bfa; background: rgba(167,139,250,0.1); padding: 0.2rem 0.5rem; border-radius: 0.25rem; }
+    .tech-list     { list-style: none; }
+    .tech-list li  { font-size: 0.9rem; color: #cbd5e1; padding: 0.5rem 0; border-bottom: 1px solid rgba(30,41,59,0.5); display: flex; align-items: flex-start; gap: 0.75rem; }
+    .tech-list li:last-child { border-bottom: none; }
+    .tech-list li::before { content: '▹'; color: #38bdf8; font-weight: bold; flex-shrink: 0; margin-top: 0.1rem; }
+    .tech-signal { color: #34d399; font-family: 'JetBrains Mono', monospace; background: rgba(52,211,153,0.1); padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-size: 0.85rem; }
+
+    /* Footer */
+    .footer { text-align: center; margin-top: 3rem; color: #475569; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; padding-top: 1rem; border-top: 1px dashed #1e293b; }
+
+    /* Fade-in */
+    .fade-in { animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-row">
+      <div class="pulse-dot"></div>
+      <h1>Stock Monitor — System Architecture</h1>
+    </div>
+    <p class="subtitle">Click any block to explore deeper &mdash; each level gets more technical</p>
+  </div>
+
+  <div class="breadcrumb" id="bc"></div>
+  <div id="content"></div>
+
+  <p class="footer">Stock Monitor &bull; PyQt5 &bull; Python 3.12 &bull; Interactive Architecture Diagram</p>
+</div>
+
+<script>
+// ─────────────────────────────────────
+// DATA — Level 0: overview cards
+// ─────────────────────────────────────
+const OVERVIEW = [
+  { id:'desktop', icon:'🖥️', color:'cyan', central: true,    title:'Desktop App',
+    summary:'Your main control panel. Displays live stock prices, price alerts, and scan results. From here you can research any stock with one click and see your trading robot at work.',
+    tags:['PyQt5','GUI','Windows'] },
+  { id:'scanner', icon:'📡', color:'emerald',  title:'Market Scanner',
+    summary:'Automatically checks hundreds of stocks on a schedule, scores each one from 0–100, and alerts you when something interesting rises to the top.',
+    tags:['yfinance','S&P 500','scoring'] },
+  { id:'ai',      icon:'🤖', color:'violet',   title:'AI Research',
+    summary:'Asks an AI to analyze a stock in depth — reads recent news, checks financials, and gives you a plain-language summary. Caches results for 6 hours.',
+    tags:['Ollama','Claude API','gemma4'] },
+  { id:'trader',  icon:'🔄', color:'rose',     title:'Trading Robot',
+    summary:'An autonomous agent that spots high-conviction setups, debates each trade internally, then buys and sells on a paper account — no human needed.',
+    tags:['Alpaca','paper trading','autonomous'] },
+  { id:'alerts',  icon:'📣', color:'amber',    title:'Alerts & Control',
+    summary:'Sends Telegram messages when a stock hits your target or tops the scan. Also accepts commands from your phone — add stocks, trigger scans, ask about any ticker.',
+    tags:['Telegram','Email','SMTP'] },
+  { id:'web',     icon:'☁️', color:'orange',   title:'Web Dashboard',
+    summary:'A live website showing your positions, scan leaderboard, and agent status from any device. Commands you issue there flow securely back to the desktop app.',
+    tags:['Cloudflare','R2','KV'] },
+];
+
+// ─────────────────────────────────────
+// DATA — Level 1: subsystems
+// ─────────────────────────────────────
+const SUBSYSTEMS = {
+  desktop: {
+    title:'Desktop App', icon:'🖥️', color:'#22d3ee',
+    desc:'A PyQt5 window that ties everything together. It starts all background workers, connects every signal to the right slot, and runs a 60-second scheduler timer for scans.',
+    components: [
+      { id:'mainwindow',   color:'#22d3ee', title:'Main Window', desc:'The central coordinator. Starts/stops workers, drives scan schedule via timer.', detail: true },
+      { id:'watchlist',    color:'#22d3ee', title:'Watchlist Panel', desc:'Live table of stocks. Fires alerts when price crosses low/high bands.', detail: true },
+      { id:'scanpanel',    color:'#22d3ee', title:'Scan Results', desc:'Shows top-ranked stocks sorted by score. Launches AI research on click.', detail: true },
+      { id:'settings',     color:'#22d3ee', title:'Settings', desc:'Configures credentials, AI backend, thresholds.', detail: false },
+      { id:'alerthistory', color:'#22d3ee', title:'Alert History', desc:'Log of every price and scan alert that has fired.', detail: false },
+    ],
+  },
+  scanner: {
+    title:'Market Scanner', icon:'📡', color:'#34d399',
+    desc:'Runs on a schedule, fetches fundamentals and technicals from Yahoo Finance, scores each stock, then alerts you when the rankings change significantly.',
+    components: [
+      { id:'universe',    color:'#34d399', title:'Stock Universe', desc:'Decides which stocks to scan. Scrapes indices.', detail: true },
+      { id:'scoring',     color:'#34d399', title:'Scoring Engine', desc:'Value + growth + technical scoring 0-100.', detail: true },
+      { id:'congressional',color:'#34d399', title:'Congress Signal', desc:'Checks public trading disclosures for bonus points.', detail: true },
+      { id:'scanscheduler',color:'#34d399', title:'Scan Scheduler', desc:'Triggers modes: quick, deep, complete based on time.', detail: false },
+      { id:'alertgates',  color:'#34d399', title:'Alert Gates', desc:'Ensures notifications fire only for top percentiles.', detail: false },
+    ],
+  },
+  ai: {
+    title:'AI Research', icon:'🤖', color:'#a78bfa',
+    desc:'On demand or triggered by the trading robot, fetches enrichment data for a stock and sends it to an LLM for a structured, plain-language analysis report.',
+    components: [
+      { id:'researcher', color:'#a78bfa', title:'Research Engine', desc:'Background thread pulling news, calling LLM.', detail: true },
+      { id:'backends',   color:'#a78bfa', title:'LLM Backends', desc:'Ollama locally or Anthropic API via Claude.', detail: true },
+      { id:'cache',      color:'#a78bfa', title:'Result Cache', desc:'6-hour cache keyed by stock symbol.', detail: false },
+      { id:'followup',   color:'#a78bfa', title:'Follow-up Q&A', desc:'Interactive chat window lasting 30 minutes.', detail: true },
+      { id:'ranking',    color:'#a78bfa', title:'Ranking Analyst', desc:'Provides holistic AI conviction ranking.', detail: false },
+    ],
+  },
+  trader: {
+    title:'Trading Robot', icon:'🔄', color:'#fb7185',
+    desc:'An autonomous loop running inside the desktop app. Processes incoming scan results and price ticks to enter and exit positions on a paper trading account.',
+    components: [
+      { id:'entry',      color:'#fb7185', title:'Entry Pipeline', desc:'Scan result → hard gates → debate.', detail: true },
+      { id:'exit',       color:'#fb7185', title:'Exit Pipeline', desc:'Price tick → four exit checks.', detail: true },
+      { id:'conviction', color:'#fb7185', title:'Conviction Scorer', desc:'Multi-factor 0–100 score driving trades.', detail: true },
+      { id:'sizer',      color:'#fb7185', title:'Position Sizer', desc:'Converts conviction score to a dollar amount.', detail: false },
+      { id:'selftuner',  color:'#fb7185', title:'Self-Tuner', desc:'Adjusts gate parameters from closed-trade history.', detail: true },
+    ],
+  },
+  alerts: {
+    title:'Alerts & Control', icon:'📣', color:'#fbbf24',
+    desc:'Bidirectional Telegram integration: the app sends you alerts when stocks move, and you can control the app from your phone using slash commands.',
+    components: [
+      { id:'telegrambot',   color:'#fbbf24', title:'Telegram Bot', desc:'Long-polls Telegram for new commands.', detail: true },
+      { id:'telegramnotif', color:'#fbbf24', title:'Telegram Notif', desc:'Sends HTML-formatted messages to chat.', detail: false },
+      { id:'email',         color:'#fbbf24', title:'Email Notifier', desc:'Sends SMTP emails for scan summaries.', detail: false },
+      { id:'alertdedup',    color:'#fbbf24', title:'Alert Deduplication', desc:'Prevents spam with per-symbol cooldowns.', detail: false },
+    ],
+  },
+  web: {
+    title:'Web Dashboard', icon:'☁️', color:'#fb923c',
+    desc:'Cloudflare-hosted companion at trader.akshaydhenge.uk that mirrors the desktop state and lets you issue commands remotely from any browser.',
+    components: [
+      { id:'cfworker',  color:'#fb923c', title:'Cloudflare Worker', desc:'Edge function accepting HTTPS commands.', detail: true },
+      { id:'r2',        color:'#fb923c', title:'R2 Object Store', desc:'Stores JSON snapshots of state.', detail: false },
+      { id:'kv',        color:'#fb923c', title:'KV Queue', desc:'Buffer decoupling web and desktop commands.', detail: false },
+      { id:'publisher', color:'#fb923c', title:'Web Publisher', desc:'Pushes latest state to Cloudflare R2.', detail: true },
+    ],
+  },
+};
+
+// ─────────────────────────────────────
+// DATA — Level 2: technical details
+// ─────────────────────────────────────
+const TECH = {
+  mainwindow: {
+    title:'MainWindow', subtitle:'Central PyQt5 coordinator — root of the application',
+    file:'gui/main_window.py', cls:'class MainWindow(QMainWindow)',
+    notes:[
+      'Holds QThread references for all workers — prevents garbage collection',
+      'Drives scan scheduling via a 60-second QTimer: checks HH:MM strings',
+      'All cross-thread communication via Qt signals/slots',
+    ],
+    signals:['_on_scan_complete(results: List[ScanResult])', '_on_research_complete(symbol, report)', '_on_cmd_scan(chat_id)', '_on_trade_executed()'],
+  },
+  watchlist: {
+    title:'WatchlistTable', subtitle:'Live price tracking with configurable alert bands',
+    file:'gui/main_window.py', cls:'QTableWidget',
+    notes:['Price updates arrive via PricePoller', 'Alert fires when price crosses low or high band', '/revise command updates targets immediately'],
+    signals:['PricePoller.prices_updated', 'AlertManager.alert_fired'],
+  },
+  scanpanel: {
+    title:'SmartScannerPanel', subtitle:'Live scan leaderboard with one-click AI research launch',
+    file:'gui/smart_scanner_panel.py', cls:'class SmartScannerPanel(QWidget)',
+    notes:['Renders List[ScanResult] in a QTableWidget sorted by total_score descending', 'Clicking a row pre-fills the AI research dialog symbol'],
+    signals:['Receives scan results via MainWindow'],
+  },
+  universe: { title:'Stock Universe', subtitle:'Eligible tickers', file:'core/stock_scanner.py', cls:'StockScanner._fetch_universe()', notes:['Scrapes Wikipedia: S&P 500, 400, 600, NASDAQ-100', 'Re-fetched each scan cycle'], signals:[] },
+  scoring: { title:'Scoring Engine', subtitle:'0–100 composite score', file:'core/stock_scanner.py', cls:'StockScanner._score_symbol(ticker)', notes:['Value×0.4 + growth×0.3 + technical×0.3'], signals:['emits List[ScanResult]'] },
+  congressional: { title:'Congressional Signal', subtitle:'Bonus points', file:'core/stock_scanner.py', cls:'StockScanner._load_congressional_data()', notes:['JSON from AWS S3', '+15 points added to total_score'], signals:[] },
+  researcher: {
+    title:'AIResearcher', subtitle:'Background enrichment thread', file:'core/ai_researcher.py', cls:'class AIResearcher(QThread)',
+    notes:['Fetches yfinance + news', 'Builds prompt and calls LLM'], signals:['research_complete(symbol, report)'],
+  },
+  backends: { title:'LLM Backends', subtitle:'Ollama/Claude', file:'core/ai_researcher.py', cls:'AIResearcher._call_llm()', notes:['Local Ollama (free) or Anthropic API (fast)'], signals:[] },
+  followup: { title:'Follow-up Q&A', subtitle:'30-min window', file:'notifiers/telegram_command_poller.py', cls:'class AIFollowUp', notes:['Session per chat_id'], signals:['cmd_aifollow'] },
+  entry: { title:'Entry Pipeline', subtitle:'Hard gates + debate', file:'core/trader_agent.py', cls:'TraderAgent._process_entry()', notes:['LLM prompted for bull/bear thesis'], signals:['trade_executed'] },
+  exit: { title:'Exit Pipeline', subtitle:'4 Exit checks', file:'core/trader_agent.py', cls:'TraderAgent._process_price_tick()', notes:['SL, TP, trailing, time-decay'], signals:['trade_executed'] },
+  conviction: { title:'Conviction Scorer', subtitle:'Multi-factor score', file:'core/trader_agent.py', cls:'TraderAgent._compute_conviction()', notes:['Scan quality, AI rank, sentiment, trend'], signals:[] },
+  selftuner: { title:'SelfTuner', subtitle:'Adjusts params', file:'core/self_tuner.py', cls:'class SelfTuner', notes:['Adjusts min score and pos size automatically based on win rate'], signals:[] },
+  telegrambot: { title:'TelegramCmdPoller', subtitle:'Long polling bot', file:'notifiers/telegram_command_poller.py', cls:'class TelegramCmdPoller', notes:['Parses /commands'], signals:['cmd_scan, cmd_aiscan, etc'] },
+  cfworker: { title:'Cloudflare Worker', subtitle:'Edge function', file:'cloudflare/worker.js', cls:'addEventListener("fetch")', notes:['Validates origin, writes KV'], signals:[] },
+  publisher: { title:'WebPublisher', subtitle:'R2 Sync', file:'core/web_publisher.py', cls:'class WebPublisher', notes:['Serializes state to JSON', 'Uploads to R2 via boto3'], signals:['web_cmd_aiscan'] },
+};
+
+// ─────────────────────────────────────
+// LAYOUTS & CONNECTIONS (Level 0 & 1)
+// ─────────────────────────────────────
+const LAYOUT_L0 = {
+  desktop: { x: 405, y: 230, w: 240 },
+  scanner: { x: 120, y: 90,  w: 200 },
+  trader:  { x: 730, y: 130, w: 200 },
+  ai:      { x: 730, y: 360, w: 200 },
+  alerts:  { x: 120, y: 360, w: 200 },
+  web:     { x: 405, y: 460, w: 200 }
+};
+
+const CONNS_L0 = [
+  ['scanner', 'desktop', '#34d399', 'Scan Results'],
+  ['desktop', 'trader', '#fb7185', 'Signals'],
+  ['desktop', 'ai', '#22d3ee', 'Ask Report'],
+  ['ai', 'trader', '#a78bfa', 'Debate'],
+  ['alerts', 'desktop', '#fbbf24', 'Alerts / Cmds'],
+  ['web', 'desktop', '#fb923c', 'State Sync']
+];
+
+const LAYOUT_L1 = {
+  desktop: {
+    nodes: {
+      mainwindow: { x: 425, y: 250 },
+      watchlist: { x: 150, y: 100 },
+      scanpanel: { x: 700, y: 100 },
+      settings: { x: 700, y: 400 },
+      alerthistory: { x: 150, y: 400 }
+    },
+    externals: [
+      { id: 'ext_scanner', icon: '📡', title: 'Market Scanner', desc: 'Inbound Data', x: 425, y: 50 },
+      { id: 'ext_telegram', icon: '📣', title: 'Alerts & Control', desc: 'Commands In', x: 50, y: 250 },
+      { id: 'ext_trader', icon: '🔄', title: 'Trading Robot', desc: 'Outbound Data', x: 425, y: 450 },
+      { id: 'ext_web', icon: '☁️', title: 'Web Dashboard', desc: 'Sync', x: 800, y: 250 }
+    ],
+    connections: [
+      ['ext_scanner', 'mainwindow', '#34d399', 'Results', false, 6],
+      ['mainwindow', 'scanpanel', '#22d3ee', 'Update'],
+      ['mainwindow', 'watchlist', '#22d3ee', 'Update'],
+      ['mainwindow', 'ext_trader', '#fb7185', 'Signals', false, 6],
+      ['ext_telegram', 'mainwindow', '#fbbf24', 'Commands', false, 6],
+      ['mainwindow', 'ext_web', '#fb923c', 'State', false, 6]
+    ]
+  },
+  scanner: {
+    nodes: {
+      universe: { x: 200, y: 100 },
+      congressional: { x: 600, y: 100 },
+      scanscheduler: { x: 100, y: 250 },
+      scoring: { x: 400, y: 250 },
+      alertgates: { x: 400, y: 400 }
+    },
+    externals: [
+      { id: 'ext_desktop', icon: '🖥️', title: 'Desktop App', desc: 'Receives Scans', x: 750, y: 350 }
+    ],
+    connections: [
+      ['scanscheduler', 'universe', '#34d399', 'Trigger'],
+      ['universe', 'scoring', '#34d399', 'Tickers'],
+      ['congressional', 'scoring', '#34d399', 'Bonus'],
+      ['scoring', 'alertgates', '#34d399', 'Scores'],
+      ['alertgates', 'ext_desktop', '#22d3ee', 'Alerts', false, 6],
+      ['scoring', 'ext_desktop', '#22d3ee', 'Results', false, 6]
+    ]
+  },
+  ai: {
+    nodes: {
+      researcher: { x: 400, y: 250 },
+      backends: { x: 700, y: 250 },
+      cache: { x: 400, y: 100 },
+      followup: { x: 100, y: 250 },
+      ranking: { x: 400, y: 450 }
+    },
+    externals: [
+      { id: 'ext_trigger', icon: '🖥️', title: 'Desktop / Trader', desc: 'Triggers', x: 100, y: 100 },
+      { id: 'ext_ui', icon: '🖥️', title: 'Desktop App', desc: 'Shows Report', x: 700, y: 100 }
+    ],
+    connections: [
+      ['ext_trigger', 'researcher', '#a78bfa', 'Request', false, 6],
+      ['researcher', 'cache', '#a78bfa', 'Check'],
+      ['researcher', 'backends', '#a78bfa', 'Query'],
+      ['researcher', 'ranking', '#a78bfa', 'Rank'],
+      ['followup', 'backends', '#a78bfa', 'Chat'],
+      ['researcher', 'ext_ui', '#22d3ee', 'Report', false, 6]
+    ]
+  },
+  trader: {
+    nodes: {
+      entry: { x: 400, y: 100 },
+      conviction: { x: 650, y: 100 },
+      sizer: { x: 650, y: 250 },
+      exit: { x: 150, y: 300 },
+      selftuner: { x: 400, y: 450 }
+    },
+    externals: [
+      { id: 'ext_scan', icon: '🖥️', title: 'Scan Results', desc: 'From Desktop', x: 100, y: 100 },
+      { id: 'ext_ticks', icon: '🖥️', title: 'Price Ticks', desc: 'From Desktop', x: 100, y: 450 },
+      { id: 'ext_ai', icon: '🤖', title: 'AI Research', desc: 'Debate', x: 800, y: 100 }
+    ],
+    connections: [
+      ['ext_scan', 'entry', '#fb7185', 'In', false, 6],
+      ['entry', 'conviction', '#fb7185', 'Score'],
+      ['conviction', 'ext_ai', '#a78bfa', 'Debate', false, 6],
+      ['conviction', 'sizer', '#fb7185', 'Size'],
+      ['ext_ticks', 'exit', '#fb7185', 'Ticks', false, 6],
+      ['selftuner', 'entry', '#fb7185', 'Tuning'],
+      ['selftuner', 'exit', '#fb7185', 'Tuning']
+    ]
+  },
+  alerts: {
+    nodes: {
+      telegrambot: { x: 150, y: 150 },
+      telegramnotif: { x: 650, y: 100 },
+      email: { x: 650, y: 300 },
+      alertdedup: { x: 400, y: 200 }
+    },
+    externals: [
+      { id: 'ext_desktop', icon: '🖥️', title: 'Desktop App', desc: 'Coordinator', x: 400, y: 400 }
+    ],
+    connections: [
+      ['telegrambot', 'ext_desktop', '#22d3ee', 'Cmds', false, 6],
+      ['ext_desktop', 'alertdedup', '#fbbf24', 'Alerts', false, 6],
+      ['alertdedup', 'telegramnotif', '#fbbf24', 'Send'],
+      ['alertdedup', 'email', '#fbbf24', 'Send']
+    ]
+  },
+  web: {
+    nodes: {
+      cfworker: { x: 400, y: 150 },
+      r2: { x: 650, y: 100 },
+      kv: { x: 650, y: 300 },
+      publisher: { x: 150, y: 300 }
+    },
+    externals: [
+      { id: 'ext_desktop', icon: '🖥️', title: 'Desktop App', desc: 'Poller/Pusher', x: 400, y: 450 },
+      { id: 'ext_user', icon: '👤', title: 'Web User', desc: 'Browser', x: 150, y: 100 }
+    ],
+    connections: [
+      ['ext_user', 'cfworker', '#fb923c', 'HTTPS', false, 6],
+      ['cfworker', 'kv', '#fb923c', 'Write Cmd'],
+      ['r2', 'cfworker', '#fb923c', 'Read State'],
+      ['publisher', 'r2', '#fb923c', 'Push State'],
+      ['kv', 'ext_desktop', '#22d3ee', 'Poll Cmds', false, 6],
+      ['ext_desktop', 'publisher', '#fb923c', 'Trigger', false, 6]
+    ]
+  }
+};
+
+// ─────────────────────────────────────
+// RENDER LOGIC
+// ─────────────────────────────────────
+let ST = { level:0, sub:null, comp:null };
+
+function go(level, sub, comp){
+  ST = { level, sub:sub||ST.sub, comp:comp||null };
+  render();
+}
+
+function render(){
+  const bc = document.getElementById('bc');
+  const crumbs = [{ label:'System Overview', level:0 }];
+  if(ST.sub) crumbs.push({ label:SUBSYSTEMS[ST.sub].title, level:1 });
+  if(ST.comp && TECH[ST.comp]) crumbs.push({ label:TECH[ST.comp].title, level:2 });
+  
+  if (crumbs.length === 1) {
+    bc.style.display = 'none';
+  } else {
+    bc.style.display = 'flex';
+    bc.innerHTML = crumbs.map((c,i)=>{
+      const last = i===crumbs.length-1;
+      return (i?'<span class="bc-sep">/</span>':'') +
+        `<span class="bc-item${last?' active':''}" ${last?'':` onclick="go(${c.level})"`}>${c.label}</span>`;
+    }).join('');
+  }
+
+  const el = document.getElementById('content');
+  if(ST.level===0)      el.innerHTML = level0();
+  else if(ST.level===1) el.innerHTML = level1();
+  else                  el.innerHTML = level2();
+
+  el.classList.remove('fade-in');
+  void el.offsetWidth;
+  el.classList.add('fade-in');
+}
+
+function getMarkerDefs() {
+  const colors = ['22d3ee', '34d399', 'a78bfa', 'fb7185', 'fbbf24', 'fb923c'];
+  return colors.map(c => `<marker id="a-${c}" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#${c}"/></marker>`).join('');
+}
+
+function conn(id1, id2, color, label, reverseArrow = false, dashArray = null, customMap = null) {
+  const layout = customMap || LAYOUT_L0;
+  const p1 = layout[id1];
+  const p2 = layout[id2];
+  if (!p1 || !p2) return '';
+
+  const w1 = p1.w || 200;
+  const w2 = p2.w || 200;
+
+  const cx1 = p1.x + (w1/2), cy1 = p1.y + 60;
+  const cx2 = p2.x + (w2/2), cy2 = p2.y + 60;
+
+  // Bezier control points with gentle perpendicular arc
+  const dx = cx2 - cx1, dy = cy2 - cy1;
+  const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+  const offset = Math.min(50, dist * 0.22);
+  const perpX = -dy/dist * offset;
+  const perpY =  dx/dist * offset;
+  const cpx1 = cx1 + dx/3 + perpX, cpy1 = cy1 + dy/3 + perpY;
+  const cpx2 = cx2 - dx/3 + perpX, cpy2 = cy2 - dy/3 + perpY;
+
+  // Midpoint at t=0.5 on cubic bezier
+  const mx = 0.125*cx1 + 0.375*cpx1 + 0.375*cpx2 + 0.125*cx2;
+  const my = 0.125*cy1 + 0.375*cpy1 + 0.375*cpy2 + 0.125*cy2;
+
+  const strokeDash = dashArray ? `stroke-dasharray="${dashArray}" opacity="0.4"` : `stroke-dasharray="6" opacity="0.6" class="path-line"`;
+  const colorHex = color.replace('#', '');
+
+  const [sx, sy, ex, ey, cp1x, cp1y, cp2x, cp2y] = reverseArrow
+    ? [cx2, cy2, cx1, cy1, cpx2, cpy2, cpx1, cpy1]
+    : [cx1, cy1, cx2, cy2, cpx1, cpy1, cpx2, cpy2];
+
+  const pathHtml = `<path d="M ${sx},${sy} C ${cp1x},${cp1y} ${cp2x},${cp2y} ${ex},${ey}" fill="none" stroke="${color}" stroke-width="2" ${strokeDash} marker-end="url(#a-${colorHex})"/>`;
+
+  const labelW = label ? Math.max(80, label.length * 7 + 12) : 0;
+
+  return `
+    ${pathHtml}
+    <circle cx="${mx}" cy="${my}" r="4" fill="${color}"/>
+    ${label ? `<rect x="${mx - labelW/2}" y="${my - 18}" width="${labelW}" height="16" fill="rgba(15,23,42,0.8)" rx="4"/>
+               <text x="${mx}" y="${my - 6}" fill="${color}" font-size="10" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">${label}</text>` : ''}
+  `;
+}
+
+function level0(){
+  const svgs = CONNS_L0.map(c => conn(c[0], c[1], c[2], c[3])).join('');
+
+  const tiles = OVERVIEW.map(b => {
+    const pos = LAYOUT_L0[b.id];
+    let borderColor = '#334155';
+    if(b.color==='cyan') borderColor='#22d3ee';
+    if(b.color==='emerald') borderColor='#34d399';
+    if(b.color==='violet') borderColor='#a78bfa';
+    if(b.color==='rose') borderColor='#fb7185';
+    if(b.color==='amber') borderColor='#fbbf24';
+    if(b.color==='orange') borderColor='#fb923c';
+
+    const isCenter = b.central === true;
+
+    return `
+      <div class="tile ${isCenter ? 'central' : ''}" style="left:${pos.x}px; top:${pos.y}px; border-top-color: ${borderColor};" onclick="go(1,'${b.id}')">
+        <div class="tile-head">
+          <div class="tile-icon">${b.icon}</div>
+          <div class="tile-name">${b.title}</div>
+        </div>
+        <div class="tile-body">${isCenter ? b.summary : b.summary.substring(0, 75) + '...'}</div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="diagram-wrap">
+      <div class="diagram-scene">
+        <svg class="conn-svg">
+          <defs>${getMarkerDefs()}</defs>
+          ${svgs}
+        </svg>
+        ${tiles}
+      </div>
+    </div>
+  `;
+}
+
+function level1(){
+  const sysId = ST.sub;
+  const sys = SUBSYSTEMS[sysId];
+  const conf = LAYOUT_L1[sysId];
+
+  // Merge internal and external nodes for path coordinates
+  const mergedMap = {};
+  for(const [k,v] of Object.entries(conf.nodes)) mergedMap[k] = v;
+  conf.externals.forEach(ext => mergedMap[ext.id] = ext);
+
+  const svgs = conf.connections.map(c => conn(c[0], c[1], c[2], c[3], c[4], c[5], mergedMap)).join('');
+
+  const tiles = sys.components.map(c => {
+    const pos = conf.nodes[c.id];
+    if(!pos) return '';
+    return `
+      <div class="tile" style="left:${pos.x}px; top:${pos.y}px; border-top-color: ${c.color};" onclick="${c.detail ? `go(2,null,'${c.id}')` : ''}">
+        <div class="tile-head" style="padding-bottom: 4px;">
+          <div class="comp-dot" style="background:${c.color}"></div>
+          <div class="tile-name">${c.title}</div>
+        </div>
+        <div class="tile-body" style="font-size: 0.75rem;">${c.desc.substring(0, 70)}...</div>
+        ${c.detail ? `<div class="comp-hint" style="padding: 6px 12px; font-size: 0.65rem; color: #475569; border-top: 1px dashed #1e293b;">View details &rarr;</div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  const extNavMap = {
+    ext_scanner: 'scanner', ext_desktop: 'desktop', ext_trader: 'trader',
+    ext_ai: 'ai', ext_telegram: 'alerts', ext_web: 'web',
+    ext_trigger: 'desktop', ext_ui: 'desktop', ext_scan: 'desktop',
+    ext_ticks: 'desktop', ext_user: null
+  };
+
+  const extTiles = conf.externals.map(ext => {
+    const navSub = extNavMap[ext.id];
+    const clickable = navSub !== undefined && navSub !== null;
+    return `
+      <div class="tile external${clickable ? ' clickable-ext' : ''}" style="left:${ext.x}px; top:${ext.y}px;" ${clickable ? `onclick="go(1,'${navSub}')"` : ''}>
+        <div class="tile-head" style="padding-bottom: 4px;">
+          <div class="tile-icon" style="font-size: 1.1rem;">${ext.icon}</div>
+          <div class="tile-name">${ext.title}</div>
+        </div>
+        <div class="tile-body" style="font-size: 0.7rem; color: #64748b;">[External] ${ext.desc}</div>
+        ${clickable ? `<div class="comp-hint" style="padding: 6px 12px; font-size: 0.65rem; color: #475569; border-top: 1px dashed #1e293b;">Navigate &rarr;</div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <button class="back-btn" onclick="go(0)">&larr; Back to Overview</button>
+    <div class="sys-header">
+      <div class="sys-icon">${sys.icon}</div>
+      <div>
+        <div class="sys-title" style="color:${sys.color}">${sys.title}</div>
+        <div class="sys-desc">${sys.desc}</div>
+      </div>
+    </div>
+    
+    <div class="diagram-wrap">
+      <div class="diagram-scene">
+        <svg class="conn-svg">
+          <defs>${getMarkerDefs()}</defs>
+          ${svgs}
+        </svg>
+        ${tiles}
+        ${extTiles}
+      </div>
+    </div>
+  `;
+}
+
+function level2(){
+  const d = TECH[ST.comp];
+  if(!d){ ST.level=1; return level1(); }
+  const sigs = d.signals&&d.signals.length ? `
+    <div class="tech-sec">
+      <div class="tech-sec-lbl">Qt Signals / Callbacks</div>
+      <ul class="tech-list">${d.signals.map(s=>`<li><span class="tech-signal">${s}</span></li>`).join('')}</ul>
+    </div>` : '';
+  return `
+    <button class="back-btn" onclick="go(1)">&larr; Back to ${SUBSYSTEMS[ST.sub].title}</button>
+    <div class="tech-panel">
+      <div class="tech-title">${d.title}</div>
+      <div class="tech-subtitle">${d.subtitle}</div>
+      <div class="tech-sec">
+        <div class="tech-sec-lbl">Source File</div>
+        <div class="tech-file">${d.file}</div>
+      </div>
+      <div class="tech-sec">
+        <div class="tech-sec-lbl">Class / Entry Point</div>
+        <ul class="tech-list"><li><span class="tech-class">${d.cls}</span></li></ul>
+      </div>
+      <div class="tech-sec">
+        <div class="tech-sec-lbl">Key Behaviors</div>
+        <ul class="tech-list">${d.notes.map(n=>`<li>${n}</li>`).join('')}</ul>
+      </div>
+      ${sigs}
+    </div>`;
+}
+
+render();
+</script>
+</body>
+</html>
