@@ -501,13 +501,15 @@ class TraderAgent(QThread):
 
             # 4. Bull/Bear debate — final check via Claude (regime-aware)
             from core.trade_debate import run_debate
-            self._log_step(f"{sym}: sending to Claude debate ({regime.label} regime)...")
+            _bearish_tag = " [BEARISH]" if ai_sentiment == "BEARISH" else ""
+            self._log_step(f"{sym}: sending to Claude debate ({regime.label} regime{_bearish_tag})...")
             debate_ok, debate_verdict = run_debate(
                 symbol=sym,
                 scan_result=scan_result,
                 ai_research=ai_research,
                 claude_rationale=ranked_item.get("rationale", ""),
                 decision_score=conviction,
+                conviction_breakdown=cv_breakdown,
                 regime=regime.label,
                 settings=settings,
             )
@@ -525,7 +527,7 @@ class TraderAgent(QThread):
                 pass
 
             if not debate_ok:
-                self._log_step(f"{sym}: debate PASS -- {debate_verdict[:80]}", "skip")
+                self._log_step(f"{sym}: debate SKIP -- {debate_verdict[:80]}", "skip")
                 log_decision(sym, "REJECT", f"debate: {debate_verdict[:120]}",
                              scan_score=scan_result.total_score, decision_score=conviction,
                              ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)

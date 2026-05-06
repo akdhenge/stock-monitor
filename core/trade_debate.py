@@ -17,27 +17,18 @@ Design rules:
 """
 import json
 import logging
-import os
 import re
 import urllib.request
 import urllib.error
-from datetime import datetime
 from typing import Dict, Optional, Tuple
+
+from core.claude_cost_tracker import log_usage as _log_claude_usage
 
 _log = logging.getLogger(__name__)
 
 _CLAUDE_URL     = "https://api.anthropic.com/v1/messages"
 _DEFAULT_MODEL  = "claude-sonnet-4-6"
 _TIMEOUT        = 90
-
-_COST_PER_M: Dict[str, Dict[str, float]] = {
-    "claude-sonnet-4-6":  {"input": 3.00,  "output": 15.00},
-    "claude-opus-4-7":    {"input": 15.00, "output": 75.00},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
-}
-_DEFAULT_COST = {"input": 3.00, "output": 15.00}
-_DATA_DIR     = os.path.join(os.path.dirname(__file__), "..", "data")
-_USAGE_LOG    = os.path.join(_DATA_DIR, "claude_usage_log.json")
 
 
 def run_debate(
@@ -46,6 +37,7 @@ def run_debate(
     ai_research: Optional[dict],
     claude_rationale: str,
     decision_score: float,
+    conviction_breakdown: Optional[Dict] = None,
     regime: str = "neutral",        # "bull" | "neutral" | "bear"
     settings: Optional[Dict] = None,
 ) -> Tuple[bool, str]:
@@ -65,7 +57,8 @@ def run_debate(
         _log.warning("trade_debate: no Claude API key — debate skipped for %s", symbol)
         return True, "debate skipped — no API key"
 
-    prompt = _build_prompt(symbol, scan_result, ai_research, claude_rationale, decision_score, regime)
+    prompt = _build_prompt(symbol, scan_result, ai_research, claude_rationale,
+                           decision_score, regime, conviction_breakdown)
 
     try:
         payload = json.dumps({
@@ -92,7 +85,7 @@ def run_debate(
         usage   = body.get("usage", {})
         in_tok  = usage.get("input_tokens", 0)
         out_tok = usage.get("output_tokens", 0)
-        _log_usage(model, symbol, regime, in_tok, out_tok)
+        _log_claude_usage(model, in_tok, out_tok, f"debate:{symbol}:{regime}")
 
         verdict, reason = _parse_verdict(raw)
         _log.info("debate [%s] %s → %s (model=%s in=%d out=%d): %s",
@@ -156,6 +149,7 @@ def _build_prompt(
     claude_rationale: str,
     decision_score: float,
     regime: str,
+    conviction_breakdown: Optional[Dict] = None,
 ) -> str:
     rsi       = f"{scan_result.rsi:.0f}"    if scan_result.rsi   else "n/a"
     macd      = "bullish"                   if scan_result.macd_bullish else "not bullish"
@@ -168,16 +162,49 @@ def _build_prompt(
         off = (scan_result.week52_high - scan_result.price) / scan_result.week52_high * 100
         pct_off_high = f" ({off:.0f}% off 52w high)"
 
+    def _fmt(v) -> str:
+        return f"{v}" if v is not None else "n/a"
+
+    pe         = _fmt(scan_result.pe_ratio)
+    peg        = _fmt(scan_result.peg_ratio)
+    roe        = _fmt(scan_result.roe)
+    de         = _fmt(scan_result.debt_equity)
+    rev_growth = _fmt(scan_result.revenue_growth)
+    sv         = getattr(scan_result, "score_value",    0) or 0
+    sg         = getattr(scan_result, "score_growth",   0) or 0
+    st         = getattr(scan_result, "score_technical",0) or 0
+
     sentiment  = ""
     short_term = ""
+    long_term  = ""
+    direction  = ""
     catalysts  = ""
     if ai_research:
         sentiment  = ai_research.get("sentiment", "")
+        direction  = ai_research.get("direction", "")
         short_term = (ai_research.get("short_term") or "")[:150]
+        long_term  = (ai_research.get("long_term")  or "")[:150]
         catalysts  = (ai_research.get("catalysts")  or "")[:120]
 
-    regime_ctx     = _REGIME_CONTEXT.get(regime, _REGIME_CONTEXT["neutral"])
-    verdict_guide  = _REGIME_VERDICT_GUIDANCE.get(regime, _REGIME_VERDICT_GUIDANCE["neutral"])
+    bearish_warning = ""
+    if sentiment.upper() == "BEARISH":
+        bearish_warning = (
+            "\n⚠ NOTE: AI sentiment is BEARISH. Evaluate whether the bear case is already "
+            "priced in or still a live risk before issuing a BUY verdict.\n"
+        )
+
+    conviction_line = ""
+    if conviction_breakdown:
+        bd = conviction_breakdown
+        conviction_line = (
+            f"Conviction breakdown: "
+            f"scan={bd.get('scan', 0):.1f} rank={bd.get('rank', 0):.1f} "
+            f"alloc={bd.get('ranker_alloc', 0):.1f} sent={bd.get('sentiment', 0):.0f} "
+            f"dir={bd.get('direction', 0):.0f} tech={bd.get('tech', 0):.0f}\n"
+        )
+
+    regime_ctx    = _REGIME_CONTEXT.get(regime, _REGIME_CONTEXT["neutral"])
+    verdict_guide = _REGIME_VERDICT_GUIDANCE.get(regime, _REGIME_VERDICT_GUIDANCE["neutral"])
 
     return (
         f"You are a senior portfolio risk manager evaluating a trade proposal.\n\n"
@@ -185,11 +212,16 @@ def _build_prompt(
         f"TRADE PROPOSAL: {symbol} @ {price}{pct_off_high}\n"
         f"Sector: {sector} | 52w high: {week52h}\n"
         f"Scan score: {scan_result.total_score:.0f}/100 | Decision score: {decision_score:.0f}/100\n"
+        f"{conviction_line}"
         f"RSI: {rsi} | MACD: {macd} | Volume spike: {vol_spike}\n"
-        f"AI sentiment: {sentiment or 'not available'}\n"
+        f"Fundamentals — PE: {pe}  PEG: {peg}  ROE: {roe}  D/E: {de}  Rev growth: {rev_growth}\n"
+        f"Scan sub-scores — Value: {sv:.0f}  Growth: {sg:.0f}  Technical: {st:.0f}\n"
+        f"AI sentiment: {sentiment or 'not available'} | Direction: {direction or 'not available'}\n"
         f"AI short-term view: {short_term or 'not available'}\n"
+        f"AI long-term view: {long_term or 'not available'}\n"
         f"AI catalysts: {catalysts or 'not available'}\n"
-        f"Portfolio analyst rationale: {claude_rationale[:250]}\n\n"
+        f"Portfolio analyst rationale: {claude_rationale[:400]}\n"
+        f"{bearish_warning}\n"
         f"EVALUATION REQUIRED:\n"
         f"1. BULL CASE (1 sentence): strongest reason this trade works.\n"
         f"2. BEAR CASE (1 sentence): the main risk that kills this trade.\n"
@@ -230,30 +262,3 @@ def _parse_verdict(raw: str) -> Tuple[str, str]:
     return "BUY", f"parse fallback: {text[:80]}"
 
 
-# ── Cost logging ────────────────────────────────────────────────────────────────
-
-def _log_usage(model: str, symbol: str, regime: str, in_tok: int, out_tok: int) -> None:
-    rates    = _COST_PER_M.get(model, _DEFAULT_COST)
-    cost_usd = (in_tok / 1_000_000) * rates["input"] + (out_tok / 1_000_000) * rates["output"]
-    record   = {
-        "ts":            datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "model":         model,
-        "input_tokens":  in_tok,
-        "output_tokens": out_tok,
-        "cost_usd":      round(cost_usd, 6),
-        "trigger":       f"debate:{symbol}:{regime}",
-    }
-    os.makedirs(_DATA_DIR, exist_ok=True)
-    log: list = []
-    if os.path.exists(_USAGE_LOG):
-        try:
-            with open(_USAGE_LOG, "r", encoding="utf-8") as f:
-                log = json.load(f)
-        except Exception:
-            log = []
-    log.append(record)
-    try:
-        with open(_USAGE_LOG, "w", encoding="utf-8") as f:
-            json.dump(log, f, indent=2, ensure_ascii=False)
-    except Exception as exc:
-        _log.debug("trade_debate: usage log write failed: %s", exc)

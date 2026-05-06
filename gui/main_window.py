@@ -85,7 +85,7 @@ class MainWindow(QMainWindow):
         self._pending_webcmd_ranking: Optional[str] = None  # cmd_id from web trigger
         self._last_ranking_result: Optional[dict] = self._load_ranking_cache()
         self._last_claude_ranking_date: str = ""   # "YYYY-MM-DD" of last auto-run
-        self._last_claude_ranking_window: str = "" # "AM" | "PM" of last auto-run
+        self._last_claude_ranking_window: str = ""  # kept for migration compat, unused
         self._ranking_auto_pending: bool = False   # suppress dialog on auto-runs
 
         # Web publisher
@@ -139,6 +139,7 @@ class MainWindow(QMainWindow):
         self._schedule_timer.start(60_000)
 
         self._load_saved_scan_results()
+        QTimer.singleShot(200, self._refresh_cost_badge)
 
     # ── UI Setup ──────────────────────────────────────────────────────────────
 
@@ -241,10 +242,19 @@ class MainWindow(QMainWindow):
         self._publish_badge.mousePressEvent = lambda _: self._show_publish_history()
         self.statusBar().addPermanentWidget(self._publish_badge)
 
+        self._cost_badge = QLabel("Claude today: $0.0000")
+        self._cost_badge.setStyleSheet("color: gray; padding: 0 6px;")
+        self._cost_badge.setToolTip("Total Claude API spend today (UTC)")
+        self.statusBar().addPermanentWidget(self._cost_badge)
+
         # Refresh the publish badge every minute
         self._publish_badge_timer = QTimer(self)
         self._publish_badge_timer.timeout.connect(self._refresh_publish_badge)
         self._publish_badge_timer.start(60_000)
+
+        self._cost_badge_timer = QTimer(self)
+        self._cost_badge_timer.timeout.connect(self._refresh_cost_badge)
+        self._cost_badge_timer.start(60_000)
 
         # 15-min safety-net publish timer
         self._publish_interval_timer = QTimer(self)
@@ -970,6 +980,7 @@ class MainWindow(QMainWindow):
             )
             self._pending_webcmd_ranking = None
         self._web_publisher.request_publish("claude_ranking_complete")
+        self._refresh_cost_badge()
         if not was_auto:
             dlg = ClaudeRankingDialog(
                 result,
@@ -989,27 +1000,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Claude Ranking Error", err)
 
     def _should_auto_rank(self) -> bool:
-        """Return True if current ET time is in an unserved daily ranking window."""
+        """Return True if current ET time is in the morning ranking window and hasn't run today."""
         from zoneinfo import ZoneInfo
         now_et = datetime.now(ZoneInfo("America/New_York"))
         today = now_et.strftime("%Y-%m-%d")
         hhmm = now_et.hour * 60 + now_et.minute
 
-        AM_START, AM_END = 9 * 60 + 30, 10 * 60 + 15   # 09:30–10:15 ET
-        PM_START, PM_END = 13 * 60 + 30, 14 * 60 + 15  # 13:30–14:15 ET
-
-        if AM_START <= hhmm < AM_END:
-            window = "AM"
-        elif PM_START <= hhmm < PM_END:
-            window = "PM"
-        else:
+        AM_START, AM_END = 9 * 60 + 30, 10 * 60 + 15  # 09:30–10:15 ET, once per day
+        if not (AM_START <= hhmm < AM_END):
             return False
 
-        if self._last_claude_ranking_date == today and self._last_claude_ranking_window == window:
+        if self._last_claude_ranking_date == today:
             return False
 
         self._last_claude_ranking_date = today
-        self._last_claude_ranking_window = window
         return True
 
     def _auto_trigger_claude_ranking(self) -> None:
@@ -1478,6 +1482,13 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
+
+    def _refresh_cost_badge(self) -> None:
+        from core.claude_cost_tracker import get_today_cost
+        cost = get_today_cost()
+        color = "green" if cost < 0.10 else ("darkorange" if cost < 0.50 else "red")
+        self._cost_badge.setText(f"Claude today: ${cost:.4f}")
+        self._cost_badge.setStyleSheet(f"color: {color}; padding: 0 6px;")
 
     def _show_publish_history(self) -> None:
         from PyQt5.QtWidgets import QDialog, QTextEdit, QVBoxLayout

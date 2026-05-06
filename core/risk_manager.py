@@ -65,12 +65,6 @@ def check_hard_gates(
     if sector_pct >= max_sector:
         return False, f"sector '{sector}' at {sector_pct*100:.0f}% cap ({max_sector*100:.0f}% max)"
 
-    # AI sentiment gate (if research is available)
-    if ai_research:
-        sentiment = ai_research.get("sentiment", "NEUTRAL").upper()
-        if sentiment == "BEARISH":
-            return False, "AI sentiment BEARISH"
-
     return True, ""
 
 

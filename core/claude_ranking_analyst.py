@@ -7,18 +7,10 @@ from typing import Any, Callable, Dict, List, Optional
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from core.ai_research_store import get_cached_entry
+from core.claude_cost_tracker import COST_PER_M, compute_cost, log_usage as _log_claude_usage
 from core.scan_result import ScanResult
 
 _log = logging.getLogger(__name__)
-
-# Estimated cost per million tokens (USD) — update if Anthropic changes pricing
-_COST_PER_M: Dict[str, Dict[str, float]] = {
-    "claude-sonnet-4-6":          {"input": 3.00,  "output": 15.00},
-    "claude-opus-4-7":            {"input": 15.00, "output": 75.00},
-    "claude-haiku-4-5-20251001":  {"input": 0.80,  "output": 4.00},
-    "claude-haiku-20240307":      {"input": 0.25,  "output": 1.25},
-}
-_DEFAULT_COST = {"input": 3.00, "output": 15.00}
 
 
 class ClaudeRankingAnalyst(QThread):
@@ -58,9 +50,7 @@ class ClaudeRankingAnalyst(QThread):
 
             settings = self._get_settings()
             model = settings.get("claude_ranking_model", "claude-sonnet-4-6")
-            rates = _COST_PER_M.get(model, _DEFAULT_COST)
-            cost_usd = (input_tokens / 1_000_000) * rates["input"] + \
-                       (output_tokens / 1_000_000) * rates["output"]
+            cost_usd = compute_cost(model, input_tokens, output_tokens)
 
             result["input_tokens"]  = input_tokens
             result["output_tokens"] = output_tokens
@@ -68,10 +58,9 @@ class ClaudeRankingAnalyst(QThread):
             result["generated_at"]  = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             result["model"]         = model
 
-            self._log_usage(model, input_tokens, output_tokens, cost_usd)
-            self.ranking_status.emit("Saving & publishing…")
+            _log_claude_usage(model, input_tokens, output_tokens, self._trigger)
+            self.ranking_status.emit("Saving…")
             self._save_cache(result)
-            self._publish_to_r2(result)
 
             self.ranking_complete.emit(result)
 
@@ -261,78 +250,16 @@ class ClaudeRankingAnalyst(QThread):
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def _save_cache(self, result: dict) -> None:
-        path = os.path.join("data", "claude_ranking_cache.json")
         os.makedirs("data", exist_ok=True)
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-        except Exception as exc:
-            _log.error("ClaudeRankingAnalyst: failed to save cache: %s", exc)
-
-    def _log_usage(self, model: str, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
-        path = os.path.join("data", "claude_usage_log.json")
-        os.makedirs("data", exist_ok=True)
-        record = {
-            "ts":            datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "model":         model,
-            "input_tokens":  input_tokens,
-            "output_tokens": output_tokens,
-            "cost_usd":      round(cost_usd, 6),
-            "trigger":       self._trigger,
-        }
-        log: list = []
-        if os.path.exists(path):
+        for path in (
+            os.path.join("data", "claude_ranking_cache.json"),
+            os.path.join("data", "web_publish", "ranking.json"),
+        ):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    log = json.load(f)
-            except Exception:
-                log = []
-        log.append(record)
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(log, f, indent=2, ensure_ascii=False)
-        except Exception as exc:
-            _log.error("ClaudeRankingAnalyst: failed to write usage log: %s", exc)
-        _log.info(
-            "Claude ranking cost — model=%s in=%d out=%d cost=$%.4f trigger=%s",
-            model, input_tokens, output_tokens, cost_usd, self._trigger,
-        )
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, indent=2, ensure_ascii=False)
+            except Exception as exc:
+                _log.error("ClaudeRankingAnalyst: failed to save %s: %s", path, exc)
 
-    def _publish_to_r2(self, result: dict) -> None:
-        settings = self._get_settings()
-        account_id = settings.get("r2_account_id", "").strip()
-        access_key = settings.get("r2_access_key_id", "").strip()
-        secret_key = settings.get("r2_secret_access_key", "").strip()
-        endpoint   = settings.get("r2_endpoint_url", "").strip()
-        bucket     = settings.get("r2_bucket", "trader-data")
 
-        if not all([account_id, access_key, secret_key]):
-            _log.warning("ClaudeRankingAnalyst: R2 credentials not configured — skipping publish")
-            return
-
-        if not endpoint:
-            endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
-
-        try:
-            import boto3
-            from botocore.config import Config
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=endpoint,
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-                config=Config(signature_version="s3v4"),
-            )
-            payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
-            s3.put_object(
-                Bucket=bucket,
-                Key="ranking.json",
-                Body=payload,
-                ContentType="application/json",
-                CacheControl="no-cache, max-age=0",
-            )
-            _log.info("ClaudeRankingAnalyst: published ranking.json to R2")
-        except ImportError:
-            _log.error("ClaudeRankingAnalyst: boto3 not installed — cannot publish to R2")
-        except Exception as exc:
-            _log.error("ClaudeRankingAnalyst: failed to publish to R2: %s", exc)

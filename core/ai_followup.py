@@ -108,5 +108,11 @@ class AIFollowUp(QThread):
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
             body = json.loads(resp.read().decode("utf-8"))
+            usage = body.get("usage", {})
+            from core.claude_cost_tracker import log_usage as _log_claude_usage
+            symbol = self._research.get("symbol", "unknown")
+            _log_claude_usage(model, usage.get("input_tokens", 0),
+                              usage.get("output_tokens", 0),
+                              f"followup:{symbol}")
             content = body.get("content", [])
             return content[0].get("text", "") if content else ""
