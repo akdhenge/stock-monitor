@@ -84,6 +84,9 @@ class MainWindow(QMainWindow):
         self._ranking_analyst: Optional[ClaudeRankingAnalyst] = None
         self._pending_webcmd_ranking: Optional[str] = None  # cmd_id from web trigger
         self._last_ranking_result: Optional[dict] = self._load_ranking_cache()
+        self._last_claude_ranking_date: str = ""   # "YYYY-MM-DD" of last auto-run
+        self._last_claude_ranking_window: str = "" # "AM" | "PM" of last auto-run
+        self._ranking_auto_pending: bool = False   # suppress dialog on auto-runs
 
         # Web publisher
         self._web_publisher = WebPublisher(
@@ -835,6 +838,8 @@ class MainWindow(QMainWindow):
         _log.info("AI ranking finalized: %s", "  ".join(rank_lines))
         save_scan_results(self._scanner_panel._results)
         self._web_publisher.request_publish("ai_ranking_complete")
+        if self._should_auto_rank():
+            self._auto_trigger_claude_ranking()
         n = len(self._ai_rank_top10)
         self._scanner_panel.set_ai_rank_status(f"AI Ranking complete ✓  ({n} stocks ranked)", "")
         QTimer.singleShot(5000, lambda: self._scanner_panel.set_ai_rank_status("", visible=False))
@@ -951,6 +956,8 @@ class MainWindow(QMainWindow):
         self._scan_status_label.setText("Claude ranking started…")
 
     def _on_ranking_complete(self, result: dict) -> None:
+        was_auto = self._ranking_auto_pending
+        self._ranking_auto_pending = False
         self._last_ranking_result = result
         self._scan_status_label.setText(
             f"Claude ranking complete — ${result.get('cost_usd', 0):.4f} "
@@ -962,19 +969,69 @@ class MainWindow(QMainWindow):
                 "Ranking published to ranking.json"
             )
             self._pending_webcmd_ranking = None
-        dlg = ClaudeRankingDialog(
-            result,
-            parent=self,
-            on_rerun=lambda: self._run_claude_ranking(trigger="desktop", force_refresh=True),
-        )
-        dlg.show()
+        self._web_publisher.request_publish("claude_ranking_complete")
+        if not was_auto:
+            dlg = ClaudeRankingDialog(
+                result,
+                parent=self,
+                on_rerun=lambda: self._run_claude_ranking(trigger="desktop", force_refresh=True),
+            )
+            dlg.show()
 
     def _on_ranking_error(self, err: str) -> None:
+        was_auto = self._ranking_auto_pending
+        self._ranking_auto_pending = False
         self._scan_status_label.setText(f"Claude ranking error: {err}")
         if self._pending_webcmd_ranking and self._web_cmd_poller:
             self._web_cmd_poller.write_done(self._pending_webcmd_ranking, "error", err)
             self._pending_webcmd_ranking = None
-        QMessageBox.warning(self, "Claude Ranking Error", err)
+        if not was_auto:
+            QMessageBox.warning(self, "Claude Ranking Error", err)
+
+    def _should_auto_rank(self) -> bool:
+        """Return True if current ET time is in an unserved daily ranking window."""
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        today = now_et.strftime("%Y-%m-%d")
+        hhmm = now_et.hour * 60 + now_et.minute
+
+        AM_START, AM_END = 9 * 60 + 30, 10 * 60 + 15   # 09:30–10:15 ET
+        PM_START, PM_END = 13 * 60 + 30, 14 * 60 + 15  # 13:30–14:15 ET
+
+        if AM_START <= hhmm < AM_END:
+            window = "AM"
+        elif PM_START <= hhmm < PM_END:
+            window = "PM"
+        else:
+            return False
+
+        if self._last_claude_ranking_date == today and self._last_claude_ranking_window == window:
+            return False
+
+        self._last_claude_ranking_date = today
+        self._last_claude_ranking_window = window
+        return True
+
+    def _auto_trigger_claude_ranking(self) -> None:
+        """Trigger Claude ranking silently (no dialogs) for scheduled auto-runs."""
+        if self._ranking_analyst is not None and self._ranking_analyst.isRunning():
+            return
+        if not self._ai_rank_top10:
+            return
+        self._ranking_auto_pending = True
+        self._ranking_analyst = ClaudeRankingAnalyst(
+            self._ai_rank_top10,
+            get_settings=lambda: self._settings,
+            trigger="auto",
+            parent=self,
+        )
+        self._ranking_analyst.ranking_complete.connect(self._on_ranking_complete)
+        self._ranking_analyst.ranking_error.connect(self._on_ranking_error)
+        self._ranking_analyst.ranking_status.connect(
+            lambda msg: self._scan_status_label.setText(f"Claude Ranking: {msg}")
+        )
+        self._ranking_analyst.start()
+        self._scan_status_label.setText("Claude ranking auto-triggered…")
 
     # ── Bot Command slots ─────────────────────────────────────────────────────
 
