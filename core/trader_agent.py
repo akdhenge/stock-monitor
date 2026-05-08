@@ -67,6 +67,7 @@ class TraderAgent(QThread):
         self._news_alert_cooldown: Dict[str, float] = {}  # sym → last alert epoch
         self._steps: list = []       # last 30 audit steps written to agent_status.json
         self._cb_active: bool = False  # circuit breaker state for web status
+        self._options_executor = None  # OptionsExecutor — lazily built after TradeExecutor
 
     # ── Step logging ───────────────────────────────────────────────────────────
 
@@ -192,6 +193,8 @@ class TraderAgent(QThread):
         except Exception:
             pass
 
+        self._options_executor = self._init_options_executor()
+
         mode_str = "dry-run" if load_trader_config().get("dry_run") else "LIVE paper"
         self.agent_status.emit(f"Trader: running ({mode_str})")
         _log.info("TraderAgent: executor ready, ATH NAV=%.2f", self._ath_nav)
@@ -216,6 +219,7 @@ class TraderAgent(QThread):
                 break
             elif msg_type == "scan":
                 self._process_scan(data)
+                self._process_options_scan(data)
             elif msg_type == "prices":
                 self._process_price_tick(data)
             elif msg_type == "sell":
@@ -695,6 +699,17 @@ class TraderAgent(QThread):
         self._check_position_news(meta_all)
         self._write_agent_status()
 
+        # Options exits and covered call overlay
+        if config.get("options_enabled", False) and self._options_executor:
+            try:
+                self._check_options_exits(config)
+            except Exception as exc:
+                _log.warning("Options exits check error: %s", exc)
+            try:
+                self._evaluate_covered_call_overlay(config, nav)
+            except Exception as exc:
+                _log.warning("Covered call overlay error: %s", exc)
+
         # IV snapshot — builds history for IVR computation (Phase 2 options)
         try:
             from core.iv_tracker import get_current_iv, update_iv_snapshot
@@ -943,6 +958,432 @@ class TraderAgent(QThread):
             return min(future) if future else None
         except Exception:
             return None
+
+    # ── Options layer ──────────────────────────────────────────────────────────
+
+    def _init_options_executor(self):
+        """Wrap the existing Alpaca client with an OptionsExecutor."""
+        if self._executor is None:
+            return None
+        try:
+            from core.options_executor import OptionsExecutor
+            opts = OptionsExecutor(self._executor._client)
+            level = opts.detect_options_level()
+            self._log_step(f"Options executor ready — approval level {level}")
+            return opts
+        except Exception as exc:
+            _log.warning("OptionsExecutor init failed: %s", exc)
+            return None
+
+    def _process_options_scan(self, results: list) -> None:
+        """
+        Options entry logic — runs after _process_scan() on the same scan batch.
+        Evaluates the same ranked candidates through the options strategy router.
+        """
+        config = load_trader_config()
+        if not config.get("options_enabled", False):
+            return
+        if not config.get("enabled", False):
+            return
+        if not market_clock.is_rth():
+            return
+        if self._options_executor is None:
+            return
+
+        options_level = config.get("options_approval_level") or 0
+        if options_level < 2:
+            _log.debug("Options: approval level %d < 2 — skipping", options_level)
+            return
+
+        import core.iv_tracker as _iv_mod
+        from core.iv_tracker import get_current_iv, update_iv_snapshot
+        from core.market_regime import detect_regime
+        from core.options_risk_manager import (
+            compute_ivr_or_proxy, classify_iv, select_strategy,
+            options_budget_remaining, size_options_trade,
+        )
+        from core.options_strategy import build_options_play
+        from core.options_portfolio import save_option_meta, OptionPositionMeta, OptionLeg
+        from core.trade_journal import log_options_fill
+        import uuid, yfinance as yf
+
+        ranking = self._load_ranking_cache()
+        ranked_list = ranking.get("ranked", []) if ranking else []
+        if not ranked_list:
+            return
+
+        scan_by_symbol = {r.symbol: r for r in results if hasattr(r, "symbol")}
+
+        try:
+            vix_val  = float(yf.Ticker("^VIX").fast_info.last_price or 20.0)
+            spy_hist = yf.Ticker("SPY").history(period="1y", interval="1d")
+        except Exception:
+            vix_val, spy_hist = 20.0, None
+
+        from core.market_regime import detect_regime, format_regime_log
+        regime = detect_regime(spy_hist, vix_val)
+
+        try:
+            account = self._executor.get_account()
+            nav = account["equity"]
+        except Exception:
+            return
+
+        budget = options_budget_remaining(nav, config)
+        if budget <= 0:
+            self._log_step("Options: capital cap reached — no new options entries", "skip")
+            return
+
+        cycle_id = str(uuid.uuid4())[:8]
+        entries_made = 0
+        max_options_per_cycle = 2  # cap to avoid overloading on a single scan
+
+        for ranked_item in ranked_list[:regime.max_candidates]:
+            if entries_made >= max_options_per_cycle:
+                break
+            if not self._running:
+                break
+
+            sym = ranked_item.get("symbol", "").upper()
+            if not sym:
+                continue
+
+            scan_result = scan_by_symbol.get(sym)
+            if scan_result is None:
+                continue
+
+            ai_research = get_cached_entry(sym)
+            ai_rank     = ranked_item.get("rank")
+            alloc_pct   = ranked_item.get("allocation_pct")
+
+            conviction, _ = compute_conviction_score(scan_result, ai_rank, ai_research, alloc_pct)
+
+            ivr = compute_ivr_or_proxy(sym, scan_result, _iv_mod)
+            iv_level = classify_iv(ivr, config)
+
+            strategy_type = select_strategy(
+                regime=regime.label,
+                iv_level=iv_level,
+                conviction=conviction,
+                options_level=options_level,
+            )
+            if strategy_type is None:
+                continue
+
+            # Estimate max loss per contract for sizing (use premium * 100 * 1 contract as proxy)
+            # Real max_loss comes from build_options_play after chain lookup
+            contracts, max_loss_est = size_options_trade(
+                conviction=conviction,
+                nav=nav,
+                max_loss_per_contract=100.0,  # $100 placeholder; refined after play is built
+                budget_remaining=budget,
+                config=config,
+            )
+            if contracts < 1:
+                continue
+
+            play = build_options_play(sym, strategy_type, scan_result, contracts)
+            if play is None:
+                self._log_step(f"OPTIONS {sym}: could not build {strategy_type} play — no chain data", "skip")
+                continue
+
+            # Refine contracts with actual max_loss from play
+            actual_max_loss_per_contract = play["max_loss"] / max(contracts, 1)
+            if actual_max_loss_per_contract > 0:
+                contracts, _ = size_options_trade(
+                    conviction=conviction,
+                    nav=nav,
+                    max_loss_per_contract=actual_max_loss_per_contract,
+                    budget_remaining=budget,
+                    config=config,
+                )
+            if contracts < 1:
+                continue
+
+            # Rebuild play with corrected contract count
+            play = build_options_play(sym, strategy_type, scan_result, contracts)
+            if play is None:
+                continue
+
+            play["ivr_at_entry"] = ivr
+
+            ivr_str = f"{ivr:.0f}" if ivr is not None else "N/A"
+            self._log_step(
+                f"OPTIONS {sym}: {strategy_type} | IVR={ivr_str} conviction={conviction:.1f} | {play['thesis'][:80]}",
+                "trade" if not config.get("dry_run", True) else "ok",
+            )
+
+            if config.get("dry_run", True):
+                self._log_step(f"DRY-RUN OPTIONS {sym} {strategy_type} — no order placed")
+                entries_made += 1
+                continue
+
+            order_ids = self._execute_options_entry(play, config, cycle_id)
+            if not order_ids:
+                continue
+
+            # Persist metadata
+            position_id = str(uuid.uuid4())[:8]
+            legs = [OptionLeg(**leg) for leg in play["legs"]]
+            meta = OptionPositionMeta(
+                position_id=position_id,
+                symbol=sym,
+                strategy_type=strategy_type,
+                legs=legs,
+                entry_premium=play["entry_premium_estimate"],
+                capital_deployed=play["capital_deployed_estimate"],
+                max_loss=play["max_loss"],
+                target_premium=play["entry_premium_estimate"] * (1 + config.get("options_profit_take_pct", 0.50)),
+                stop_premium=play["entry_premium_estimate"] * (1 - config.get("options_stop_loss_pct", 0.50)),
+                thesis=play["thesis"],
+                ivr_at_entry=ivr,
+                underlying_price_at_entry=play["underlying_price"],
+                underlying_stop_loss=play.get("underlying_stop_loss"),
+                scan_score_at_entry=scan_result.total_score,
+                opened_at=datetime.now().isoformat(),
+            )
+            save_option_meta(meta)
+            log_options_fill(
+                position_id=position_id, symbol=sym,
+                strategy_type=strategy_type, side="OPEN",
+                contracts=contracts, fill_price=play["entry_premium_estimate"],
+                order_id=order_ids[0] if order_ids else "dry-run",
+                thesis=play["thesis"], cycle_id=cycle_id,
+            )
+            budget -= play["capital_deployed_estimate"]
+            entries_made += 1
+            self._log_step(f"OPTIONS BUY {sym} {strategy_type} placed (conviction {conviction:.1f})", "trade")
+
+    def _execute_options_entry(self, play: dict, config: dict, cycle_id: str) -> list:
+        """Submit orders for all legs of an options play. Returns list of order IDs."""
+        order_ids = []
+        legs = play.get("legs", [])
+        strategy_type = play.get("strategy_type", "")
+
+        # Multi-leg strategies (spreads, condors) — use spread order if Level 3
+        if len(legs) > 1 and config.get("options_approval_level", 2) >= 3:
+            spread_legs = []
+            for leg in legs:
+                spread_legs.append({
+                    "contract_symbol": leg["contract_symbol"],
+                    "side": "buy" if leg["side"] == "long" else "sell",
+                    "qty": leg["contracts"],
+                })
+            limit = abs(play.get("entry_premium_estimate", 0.01))
+            oid, status = self._options_executor.submit_spread(spread_legs, limit_price=limit)
+            if oid:
+                order_ids.append(oid)
+        else:
+            # Submit each leg individually
+            for leg in legs:
+                price_estimate = abs(play.get("entry_premium_estimate", 0.01))
+                if leg["side"] == "long":
+                    oid, _ = self._options_executor.buy_option(
+                        leg["contract_symbol"], leg["contracts"], price_estimate
+                    )
+                else:
+                    oid, _ = self._options_executor.sell_option(
+                        leg["contract_symbol"], leg["contracts"], price_estimate
+                    )
+                if oid:
+                    order_ids.append(oid)
+
+        return order_ids
+
+    def _execute_options_exit(self, meta, reason: str, cycle_id: Optional[str]) -> None:
+        """Close all legs of an options position."""
+        from core.options_portfolio import delete_option_meta
+        from core.trade_journal import log_options_fill
+
+        # Compute net current value with the same sign convention as entry_premium:
+        # long legs are positive, short legs are negative.
+        net_current = 0.0
+        last_close_price = 0.0
+        for leg in meta.legs:
+            current_price = self._options_executor.get_option_current_price(leg.contract_symbol) or 0.0
+            sign = 1 if leg.side == "long" else -1
+            net_current += current_price * sign
+            last_close_price = current_price
+            self._options_executor.close_option_position(leg.contract_symbol, leg.contracts)
+
+        contracts_per_leg = meta.legs[0].contracts if meta.legs else 1
+        total_pnl = (net_current - meta.entry_premium) * 100 * contracts_per_leg
+
+        log_options_fill(
+            position_id=meta.position_id, symbol=meta.symbol,
+            strategy_type=meta.strategy_type, side="CLOSE",
+            contracts=sum(leg.contracts for leg in meta.legs),
+            fill_price=last_close_price,
+            order_id="close",
+            realized_pnl=round(total_pnl, 2),
+            exit_reason=reason, cycle_id=cycle_id,
+        )
+        delete_option_meta(meta.position_id)
+
+        msg = {
+            "action":       "OPTIONS_CLOSE",
+            "symbol":       meta.symbol,
+            "strategy":     meta.strategy_type,
+            "realized_pnl": round(total_pnl, 2),
+            "reason":       reason,
+        }
+        self.trade_executed.emit(msg)
+        _log.info("OPTIONS CLOSE %s %s P&L=$%.2f (%s)",
+                  meta.symbol, meta.strategy_type, total_pnl, reason)
+
+    def _check_options_exits(self, config: dict) -> None:
+        """Check all open options positions for exit conditions (heartbeat)."""
+        from core.options_portfolio import load_all_option_meta
+        from core.options_risk_manager import check_options_exit
+        from core.iv_tracker import get_ivr
+        from core.options_strategy import days_to_expiry
+
+        all_meta = load_all_option_meta()
+        if not all_meta:
+            return
+
+        try:
+            alpaca_opts = self._options_executor.get_options_positions()
+        except Exception:
+            alpaca_opts = []
+
+        price_by_contract = {p["contract_symbol"]: p.get("current_price") for p in alpaca_opts}
+
+        import yfinance as yf
+        for pid, meta in list(all_meta.items()):
+            dte = days_to_expiry(meta.legs[0].expiration if meta.legs else "2099-01-01")
+            current_premium = None
+            for leg in meta.legs:
+                cp = price_by_contract.get(leg.contract_symbol)
+                if cp:
+                    current_premium = cp
+                    break
+
+            try:
+                underlying_price = float(yf.Ticker(meta.symbol).fast_info.last_price or 0) or None
+            except Exception:
+                underlying_price = None
+
+            current_ivr = get_ivr(meta.symbol)
+
+            should_exit, exit_reason = check_options_exit(
+                meta=meta,
+                current_premium=current_premium,
+                underlying_price=underlying_price,
+                days_to_expiry=dte,
+                current_ivr=current_ivr,
+                config=config,
+            )
+            if should_exit:
+                self._log_step(f"OPTIONS EXIT {meta.symbol} {meta.strategy_type}: {exit_reason}", "trade")
+                if not config.get("dry_run", True):
+                    self._execute_options_exit(meta, exit_reason, cycle_id=None)
+                else:
+                    _log.info("DRY-RUN OPTIONS EXIT %s — %s", meta.symbol, exit_reason)
+
+    def _evaluate_covered_call_overlay(self, config: dict, nav: float) -> None:
+        """
+        For existing stock positions held > N days with unrealized gain > threshold,
+        sell a 30-delta covered call at 14–21 DTE to collect premium.
+        """
+        min_hold_days = config.get("options_covered_call_min_hold_days", 7)
+        min_gain_pct  = config.get("options_covered_call_min_gain_pct", 0.05)
+        options_level = config.get("options_approval_level", 0) or 0
+        if options_level < 2:
+            return
+
+        from core.options_risk_manager import options_budget_remaining
+        budget = options_budget_remaining(nav, config)
+        if budget <= 0:
+            return
+
+        from core.options_strategy import build_options_play
+        from core.options_portfolio import save_option_meta, OptionPositionMeta, OptionLeg, get_options_for_symbol
+        from core.trade_journal import log_options_fill
+        import uuid
+
+        meta_all = load_all_meta()
+
+        try:
+            alpaca_positions = self._executor.get_positions()
+        except Exception:
+            return
+
+        for p in alpaca_positions:
+            sym = p["symbol"]
+            meta = meta_all.get(sym)
+            if meta is None:
+                continue
+
+            # Check hold period
+            opened = datetime.fromisoformat(meta.opened_at)
+            days_held = max(0, (datetime.now() - opened).days)
+            if days_held < min_hold_days:
+                continue
+
+            # Check unrealized gain
+            entry = meta.entry_price
+            current = p.get("current_price") or entry
+            if entry <= 0 or (current - entry) / entry < min_gain_pct:
+                continue
+
+            # Already have a covered call on this position?
+            existing = get_options_for_symbol(sym)
+            if any(m.strategy_type == "covered_call" for m in existing):
+                continue
+
+            qty = p.get("qty", 0)
+            if qty < 100:
+                continue
+
+            contracts = int(qty // 100)
+            play = build_options_play(sym, "covered_call", type("sr", (), {
+                "total_score": meta.scan_score_at_entry,
+                "volatility_20d": None,
+            })(), contracts)
+
+            if play is None:
+                continue
+
+            self._log_step(
+                f"COVERED CALL overlay: {sym} held {days_held}d gain "
+                f"{(current-entry)/entry*100:.1f}% — {play['thesis'][:80]}",
+                "trade" if not config.get("dry_run", True) else "ok",
+            )
+
+            if config.get("dry_run", True):
+                continue
+
+            oids = self._execute_options_entry(play, config, cycle_id="cc")
+            if not oids:
+                continue
+
+            position_id = str(uuid.uuid4())[:8]
+            legs = [OptionLeg(**leg) for leg in play["legs"]]
+            cc_meta = OptionPositionMeta(
+                position_id=position_id,
+                symbol=sym,
+                strategy_type="covered_call",
+                legs=legs,
+                entry_premium=play["entry_premium_estimate"],
+                capital_deployed=0.0,
+                max_loss=0.0,
+                target_premium=play["entry_premium_estimate"] * (1 + config.get("options_profit_take_pct", 0.50)),
+                stop_premium=0.0,
+                thesis=play["thesis"],
+                ivr_at_entry=None,
+                underlying_price_at_entry=current,
+                underlying_stop_loss=meta.stop_loss_price,
+                scan_score_at_entry=meta.scan_score_at_entry,
+                opened_at=datetime.now().isoformat(),
+            )
+            save_option_meta(cc_meta)
+            log_options_fill(
+                position_id=position_id, symbol=sym,
+                strategy_type="covered_call", side="OPEN",
+                contracts=contracts, fill_price=play["entry_premium_estimate"],
+                order_id=oids[0], thesis=play["thesis"],
+            )
 
     @staticmethod
     def _parse_target(stock_play: str, current_price: Optional[float]) -> Optional[float]:

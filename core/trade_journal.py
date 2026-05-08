@@ -95,6 +95,38 @@ def log_fill(
     _append(record)
 
 
+def log_options_fill(
+    position_id: str,
+    symbol: str,
+    strategy_type: str,
+    side: str,                       # "OPEN" | "CLOSE"
+    contracts: int,
+    fill_price: float,               # net premium per share (debit +, credit -)
+    order_id: str,
+    thesis: Optional[str] = None,
+    realized_pnl: Optional[float] = None,
+    exit_reason: Optional[str] = None,
+    cycle_id: Optional[str] = None,
+) -> None:
+    record: Dict[str, Any] = {
+        "type":          "fill",
+        "instrument":    "option",
+        "ts":            datetime.now().astimezone().isoformat(),
+        "position_id":   position_id,
+        "symbol":        symbol.upper(),
+        "strategy_type": strategy_type,
+        "side":          side.upper(),
+        "contracts":     contracts,
+        "fill_price":    fill_price,
+        "order_id":      order_id,
+    }
+    if thesis       is not None: record["thesis"]       = thesis[:200]
+    if realized_pnl is not None: record["realized_pnl"] = round(realized_pnl, 2)
+    if exit_reason  is not None: record["exit_reason"]  = exit_reason
+    if cycle_id     is not None: record["cycle_id"]     = cycle_id
+    _append(record)
+
+
 def log_nav_snapshot(nav: float, cash: float, positions_value: float,
                      spy_close: Optional[float] = None) -> None:
     record: Dict[str, Any] = {

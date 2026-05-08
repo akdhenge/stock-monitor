@@ -292,6 +292,27 @@ class WebPublisher(QThread):
                 rows.append(row)
             return rows
 
+        # Include open options positions for dashboard visibility
+        options_positions = []
+        try:
+            from core.options_portfolio import load_all_option_meta
+            from dataclasses import asdict
+            for pid, meta in load_all_option_meta().items():
+                options_positions.append({
+                    "position_id":    pid,
+                    "symbol":         meta.symbol,
+                    "strategy_type":  meta.strategy_type,
+                    "expiration":     meta.legs[0].expiration if meta.legs else None,
+                    "entry_premium":  meta.entry_premium,
+                    "capital_deployed": meta.capital_deployed,
+                    "max_loss":       meta.max_loss,
+                    "thesis":         meta.thesis[:120],
+                    "ivr_at_entry":   meta.ivr_at_entry,
+                    "opened_at":      meta.opened_at,
+                })
+        except Exception:
+            pass
+
         return {
             "deep": {
                 "scan_timestamp_utc": _scan_ts(deep_results),
@@ -303,6 +324,7 @@ class WebPublisher(QThread):
                 "universe_size": len(complete_results),
                 "top5": _rows(complete_results, 5),
             },
+            "options_positions": options_positions,
         }
 
     def _serialize_watchlist(self, now_utc: str) -> Dict[str, Any]:

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stock Monitor — Architecture v2</title>
+  <title>Stock Monitor — Architecture v3</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -102,7 +102,7 @@
   <div class="breadcrumb" id="bc"></div>
   <div id="content"></div>
 
-  <p class="footer">Stock Monitor &bull; PyQt5 &bull; Python 3.12 &bull; Interactive Architecture Diagram</p>
+  <p class="footer">Stock Monitor &bull; PyQt5 &bull; Python 3.12 &bull; Interactive Architecture Diagram &bull; v4 &bull; 2026-05-07</p>
 </div>
 
 <script>
@@ -164,18 +164,21 @@ const SUBSYSTEMS = {
       { id:'backends',   color:'#a78bfa', title:'LLM Backends', desc:'Ollama locally or Anthropic API via Claude.', detail: true },
       { id:'cache',      color:'#a78bfa', title:'Result Cache', desc:'6-hour cache keyed by stock symbol.', detail: false },
       { id:'followup',   color:'#a78bfa', title:'Follow-up Q&A', desc:'Interactive chat window lasting 30 minutes.', detail: true },
-      { id:'ranking',    color:'#a78bfa', title:'Ranking Analyst', desc:'Provides holistic AI conviction ranking.', detail: false },
+      { id:'ranking',    color:'#a78bfa', title:'Ranking Analyst', desc:'Auto-triggered 2× daily (09:30 & 13:30 ET) after AI ranking finalizes; also manual via button.', detail: true },
     ],
   },
   trader: {
     title:'Trading Robot', icon:'🔄', color:'#fb7185',
-    desc:'An autonomous loop running inside the desktop app. Processes incoming scan results and price ticks to enter and exit positions on a paper trading account.',
+    desc:'An autonomous loop running inside the desktop app. Processes scan results to enter stock and options positions on a paper account, monitors price ticks to exit, and tunes its own parameters from trade history.',
     components: [
-      { id:'entry',      color:'#fb7185', title:'Entry Pipeline', desc:'Scan result → hard gates → debate.', detail: true },
-      { id:'exit',       color:'#fb7185', title:'Exit Pipeline', desc:'Price tick → four exit checks.', detail: true },
-      { id:'conviction', color:'#fb7185', title:'Conviction Scorer', desc:'Multi-factor 0–100 score driving trades.', detail: true },
-      { id:'sizer',      color:'#fb7185', title:'Position Sizer', desc:'Converts conviction score to a dollar amount.', detail: false },
-      { id:'selftuner',  color:'#fb7185', title:'Self-Tuner', desc:'Adjusts gate parameters from closed-trade history.', detail: true },
+      { id:'entry',           color:'#fb7185', title:'Stock Entry Pipeline', desc:'Scan result → hard gates → LLM debate → buy.', detail: true },
+      { id:'exit',            color:'#fb7185', title:'Exit Pipeline', desc:'Price tick → stop-loss, profit, trailing, age; options exits in heartbeat.', detail: true },
+      { id:'conviction',      color:'#fb7185', title:'Conviction Scorer', desc:'Multi-factor 0–100 score; drives both stock sizing and options routing.', detail: true },
+      { id:'sizer',           color:'#fb7185', title:'Position Sizer', desc:'Converts conviction to dollar amount via concave curve.', detail: false },
+      { id:'selftuner',       color:'#fb7185', title:'Self-Tuner', desc:'Adjusts gate parameters from closed-trade history.', detail: true },
+      { id:'optionsstrategy', color:'#fb7185', title:'Options Strategy Router', desc:'Regime × IVR × approval level → strategy type + strikes.', detail: true },
+      { id:'optionsrisk',     color:'#fb7185', title:'Options Risk Manager', desc:'Capital cap (20% NAV), contract sizing, exit triggers.', detail: true },
+      { id:'optionsexec',     color:'#fb7185', title:'Options Executor', desc:'Alpaca Level 2/3 order submission; detects approval level.', detail: true },
     ],
   },
   alerts: {
@@ -211,8 +214,10 @@ const TECH = {
       'Holds QThread references for all workers — prevents garbage collection',
       'Drives scan scheduling via a 60-second QTimer: checks HH:MM strings',
       'All cross-thread communication via Qt signals/slots',
+      'Auto-triggers ClaudeRankingAnalyst 2× daily via _should_auto_rank() after AI ranking finalizes (hook point: post _start_auto_ai_ranking finalization)',
+      '_auto_trigger_claude_ranking(): silent mode — no dialogs, always force_refresh=True; returns early if analyst running or no top-10 data',
     ],
-    signals:['_on_scan_complete(results: List[ScanResult])', '_on_research_complete(symbol, report)', '_on_cmd_scan(chat_id)', '_on_trade_executed()'],
+    signals:['_on_scan_complete(results: List[ScanResult])', '_on_research_complete(symbol, report)', '_on_cmd_scan(chat_id)', '_on_trade_executed()', '_on_ranking_complete(result: dict)'],
   },
   watchlist: {
     title:'WatchlistTable', subtitle:'Live price tracking with configurable alert bands',
@@ -235,13 +240,84 @@ const TECH = {
   },
   backends: { title:'LLM Backends', subtitle:'Ollama/Claude', file:'core/ai_researcher.py', cls:'AIResearcher._call_llm()', notes:['Local Ollama (free) or Anthropic API (fast)'], signals:[] },
   followup: { title:'Follow-up Q&A', subtitle:'30-min window', file:'notifiers/telegram_command_poller.py', cls:'class AIFollowUp', notes:['Session per chat_id'], signals:['cmd_aifollow'] },
-  entry: { title:'Entry Pipeline', subtitle:'Hard gates + debate', file:'core/trader_agent.py', cls:'TraderAgent._process_entry()', notes:['LLM prompted for bull/bear thesis'], signals:['trade_executed'] },
-  exit: { title:'Exit Pipeline', subtitle:'4 Exit checks', file:'core/trader_agent.py', cls:'TraderAgent._process_price_tick()', notes:['SL, TP, trailing, time-decay'], signals:['trade_executed'] },
-  conviction: { title:'Conviction Scorer', subtitle:'Multi-factor score', file:'core/trader_agent.py', cls:'TraderAgent._compute_conviction()', notes:['Scan quality, AI rank, sentiment, trend'], signals:[] },
-  selftuner: { title:'SelfTuner', subtitle:'Adjusts params', file:'core/self_tuner.py', cls:'class SelfTuner', notes:['Adjusts min score and pos size automatically based on win rate'], signals:[] },
+  entry: {
+    title:'Stock Entry Pipeline', subtitle:'Hard gates + LLM debate → stock buy',
+    file:'core/trader_agent.py', cls:'TraderAgent._process_scan()',
+    notes:[
+      'Hard gates: min_scan_score, min_decision_score, cash reserve, sector cap, VIX halt threshold',
+      'Conviction score gates sizing via concave curve; high conviction → larger position',
+      'LLM trade debate: prompts for bull and bear thesis before committing capital',
+      '_process_options_scan() runs on the same scan results immediately after, routing to the options layer',
+    ], signals:['trade_executed'],
+  },
+  exit: {
+    title:'Exit Pipeline', subtitle:'Stop-loss · profit · trailing · age · options exits',
+    file:'core/trader_agent.py', cls:'TraderAgent._check_stock_exits()',
+    notes:[
+      'Stock exits: stop-loss (default 8%), profit target, trailing stop, max position age',
+      '_check_options_exits() runs every heartbeat (15 min) alongside stock exit checks',
+      'Options exit triggers: +50% profit, −50% stop, DTE ≤ 21 days, underlying hits stock stop price',
+      'IV crush trigger: closes short-premium positions when IVR drops below 15',
+      '_evaluate_covered_call_overlay() runs in heartbeat — sells 30-delta calls on winning stock positions',
+    ], signals:['trade_executed'],
+  },
+  conviction: { title:'Conviction Scorer', subtitle:'Multi-factor 0–100 score', file:'core/trader_agent.py', cls:'compute_conviction_score()', notes:['Scan quality 35%, AI rank 20%, ranker allocation 15%, sentiment 12pts, direction 6pts, technicals 12pts', 'Same conviction score feeds both stock position sizing and options strategy routing'], signals:[] },
+  selftuner: { title:'SelfTuner', subtitle:'Adjusts params from trade history', file:'core/self_tuner.py', cls:'class SelfTuner', notes:['Adjusts min score and position size automatically based on win rate'], signals:[] },
+  optionsstrategy: {
+    title:'Options Strategy Router', subtitle:'Regime × IVR × approval_level → strategy + strikes',
+    file:'core/options_strategy.py + core/options_risk_manager.py', cls:'select_strategy() → build_options_play()',
+    notes:[
+      'Routing: bull+low_IV+L2 → long_call; bull+high_IV → CSP; neutral+high_IV+L3 → iron_condor; bear+low_IV → long_put; bear+low_IV+L3 → bear_put_spread',
+      'IVR proxy (Phase 2a): min(volatility_20d × 200, 100) — auto-upgrades to real IVR once 30 daily snapshots accrue in iv_tracker',
+      'Strike selection via yfinance option chain: 30–40 delta for directional, ~7% OTM for premium collection (CSP/covered call)',
+      'Expiry: nearest expiry in 28–50 DTE window targeting 35 DTE',
+      'Covered call overlay: separate heartbeat check on stock positions held > 7 days with > 5% unrealized gain',
+      'OCC symbol format: AAPL241231C00150000 — generated in _occ_symbol()',
+    ],
+    signals:[],
+  },
+  optionsrisk: {
+    title:'Options Risk Manager', subtitle:'Capital cap · contract sizing · exit conditions',
+    file:'core/options_risk_manager.py + core/options_portfolio.py', cls:'options_budget_remaining(), size_options_trade(), check_options_exit()',
+    notes:[
+      'Capital cap: 20% NAV deployed in options at any time (premium paid for debits, full collateral for CSPs)',
+      'Per-trade max loss: 1% NAV; contracts = floor(max_loss_dollars / max_loss_per_contract)',
+      'Exit triggers checked each heartbeat: +50% profit, −50% stop, DTE ≤ 21, underlying stop hit, IVR < 15',
+      'OptionPositionMeta persisted to data/options_portfolio_meta.json via atomic write (.tmp → os.replace)',
+      'total_capital_deployed() sums capital_deployed across all open OptionPositionMeta entries',
+    ],
+    signals:[],
+  },
+  optionsexec: {
+    title:'Options Executor', subtitle:'Alpaca Level 2 / Level 3 order wrapper',
+    file:'core/options_executor.py', cls:'class OptionsExecutor',
+    notes:[
+      'detect_options_level(): fetches account.options_approved_level from Alpaca, caches to trader_config.json on first call',
+      'Level 2 (single-leg): LimitOrderRequest for long call/put, CSP, covered call — mid-price limit only, no market orders',
+      'Level 3+ (multi-leg): MultiLegOrderRequest for bull/bear spreads and iron condors',
+      'close_option_position(): tries alpaca close_position() first; falls back to sell at current_mid × 0.99',
+      'Identifies options in account by OCC symbol length > 10 with mid-string digits',
+      'P&L: (net_current − entry_premium) × 100 × contracts; net_current sums long legs positive, short legs negative',
+    ],
+    signals:[],
+  },
   telegrambot: { title:'TelegramCmdPoller', subtitle:'Long polling bot', file:'notifiers/telegram_command_poller.py', cls:'class TelegramCmdPoller', notes:['Parses /commands'], signals:['cmd_scan, cmd_aiscan, etc'] },
   cfworker: { title:'Cloudflare Worker', subtitle:'Edge function', file:'cloudflare/worker.js', cls:'addEventListener("fetch")', notes:['Validates origin, writes KV'], signals:[] },
-  publisher: { title:'WebPublisher', subtitle:'R2 Sync', file:'core/web_publisher.py', cls:'class WebPublisher', notes:['Serializes state to JSON', 'Uploads to R2 via boto3'], signals:['web_cmd_aiscan'] },
+  publisher: { title:'WebPublisher', subtitle:'R2 Sync', file:'core/web_publisher.py', cls:'class WebPublisher', notes:['Serializes scan results, watchlist, alerts, AI research, and options_positions array to JSON', 'Uploads all files in web_publish/ to Cloudflare R2 via boto3', 'Coalesces rapid triggers into single publish (2-second window)'], signals:['web_cmd_aiscan'] },
+  ranking: {
+    title:'ClaudeRankingAnalyst', subtitle:'Auto-triggered 2× daily + manual',
+    file:'core/claude_ranking_analyst.py', cls:'class ClaudeRankingAnalyst(QThread)',
+    notes:[
+      'Fires automatically after AI auto-ranking finalizes at 09:30–10:15 ET (AM) and 13:30–14:15 ET (PM)',
+      'Deduplicates per calendar-day+window pair — multiple scans in the same window do not double-fire',
+      '_should_auto_rank() checks ET time; _auto_trigger_claude_ranking() starts silently (no dialog, no QMessageBox)',
+      '_ranking_auto_pending flag: captured into was_auto before clearing — gates dialog and error popup suppression',
+      'On completion: always calls request_publish("claude_ranking_complete"); dialog only shown for manual/web triggers',
+      'Cache written to data/claude_ranking_cache.json; no TTL check — any JSON on disk is used regardless of age',
+      'Outputs: rank 1–10, allocation_pct, rationale, stock_play (entry/target/stop), options_play, risk',
+    ],
+    signals:['ranking_complete(result: dict)', 'ranking_error(err: str)', 'ranking_status(msg: str)'],
+  },
 };
 
 // ─────────────────────────────────────
@@ -311,46 +387,55 @@ const LAYOUT_L1 = {
   },
   ai: {
     nodes: {
-      researcher: { x: 400, y: 250 },
-      backends: { x: 700, y: 250 },
-      cache: { x: 400, y: 100 },
-      followup: { x: 100, y: 250 },
-      ranking: { x: 400, y: 450 }
+      researcher: { x: 380, y: 220 },
+      backends: { x: 700, y: 220 },
+      cache: { x: 380, y: 80 },
+      followup: { x: 80, y: 220 },
+      ranking: { x: 380, y: 420 }
     },
     externals: [
-      { id: 'ext_trigger', icon: '🖥️', title: 'Desktop / Trader', desc: 'Triggers', x: 100, y: 100 },
-      { id: 'ext_ui', icon: '🖥️', title: 'Desktop App', desc: 'Shows Report', x: 700, y: 100 }
+      { id: 'ext_trigger', icon: '🖥️', title: 'Desktop / Trader', desc: 'Triggers', x: 80, y: 80 },
+      { id: 'ext_ui', icon: '🖥️', title: 'Desktop App', desc: 'Shows Report', x: 700, y: 80 },
+      { id: 'ext_web', icon: '☁️', title: 'Web Dashboard', desc: 'Auto-publish', x: 700, y: 420 }
     ],
     connections: [
       ['ext_trigger', 'researcher', '#a78bfa', 'Request', false, 6],
       ['researcher', 'cache', '#a78bfa', 'Check'],
       ['researcher', 'backends', '#a78bfa', 'Query'],
-      ['researcher', 'ranking', '#a78bfa', 'Rank'],
+      ['researcher', 'ranking', '#a78bfa', 'Auto-rank'],
       ['followup', 'backends', '#a78bfa', 'Chat'],
-      ['researcher', 'ext_ui', '#22d3ee', 'Report', false, 6]
+      ['researcher', 'ext_ui', '#22d3ee', 'Report', false, 6],
+      ['ranking', 'ext_web', '#fb923c', 'Publish', false, 6]
     ]
   },
   trader: {
     nodes: {
-      entry: { x: 400, y: 100 },
-      conviction: { x: 650, y: 100 },
-      sizer: { x: 650, y: 250 },
-      exit: { x: 150, y: 300 },
-      selftuner: { x: 400, y: 450 }
+      entry:           { x: 260, y: 80  },
+      conviction:      { x: 510, y: 80  },
+      sizer:           { x: 760, y: 80  },
+      optionsstrategy: { x: 260, y: 290 },
+      optionsrisk:     { x: 510, y: 290 },
+      optionsexec:     { x: 760, y: 290 },
+      exit:            { x: 60,  y: 470 },
+      selftuner:       { x: 510, y: 470 },
     },
     externals: [
-      { id: 'ext_scan', icon: '🖥️', title: 'Scan Results', desc: 'From Desktop', x: 100, y: 100 },
-      { id: 'ext_ticks', icon: '🖥️', title: 'Price Ticks', desc: 'From Desktop', x: 100, y: 450 },
-      { id: 'ext_ai', icon: '🤖', title: 'AI Research', desc: 'Debate', x: 800, y: 100 }
+      { id: 'ext_scan',  icon: '📡', title: 'Scan Results', desc: 'From Desktop',  x: 30,  y: 80  },
+      { id: 'ext_ai',    icon: '🤖', title: 'AI Research',  desc: 'Debate + Rank', x: 30,  y: 290 },
+      { id: 'ext_ticks', icon: '💹', title: 'Price Ticks',  desc: 'From Desktop',  x: 260, y: 470 },
     ],
     connections: [
-      ['ext_scan', 'entry', '#fb7185', 'In', false, 6],
-      ['entry', 'conviction', '#fb7185', 'Score'],
-      ['conviction', 'ext_ai', '#a78bfa', 'Debate', false, 6],
-      ['conviction', 'sizer', '#fb7185', 'Size'],
-      ['ext_ticks', 'exit', '#fb7185', 'Ticks', false, 6],
-      ['selftuner', 'entry', '#fb7185', 'Tuning'],
-      ['selftuner', 'exit', '#fb7185', 'Tuning']
+      ['ext_scan',        'entry',           '#fb7185', 'Stock In',   false, 6],
+      ['ext_scan',        'optionsstrategy', '#fb7185', 'Opts In',    false, 6],
+      ['entry',           'conviction',      '#fb7185', 'Score'],
+      ['conviction',      'sizer',           '#fb7185', 'Size'],
+      ['conviction',      'optionsstrategy', '#fb7185', 'Conviction'],
+      ['conviction',      'ext_ai',          '#a78bfa', 'Debate',     false, 6],
+      ['optionsstrategy', 'optionsrisk',     '#fb7185', 'Play'],
+      ['optionsrisk',     'optionsexec',     '#fb7185', 'Execute'],
+      ['ext_ticks',       'exit',            '#fb7185', 'Ticks',      false, 6],
+      ['selftuner',       'entry',           '#fb7185', 'Tuning'],
+      ['selftuner',       'optionsstrategy', '#fb7185', 'Tuning'],
     ]
   },
   alerts: {
@@ -548,7 +633,7 @@ function level1(){
     ext_scanner: 'scanner', ext_desktop: 'desktop', ext_trader: 'trader',
     ext_ai: 'ai', ext_telegram: 'alerts', ext_web: 'web',
     ext_trigger: 'desktop', ext_ui: 'desktop', ext_scan: 'desktop',
-    ext_ticks: 'desktop', ext_user: null
+    ext_ticks: 'desktop', ext_user: null, ext_web_pub: 'web'
   };
 
   const extTiles = conf.externals.map(ext => {

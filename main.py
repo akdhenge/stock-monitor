@@ -1,12 +1,64 @@
 import sys
 import os
+import logging
+import threading
+import traceback
 import warnings
+from logging.handlers import RotatingFileHandler
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="boto3")
 warnings.filterwarnings("ignore", message=".*Boto3 will no longer support Python 3.9.*")
 
 # Ensure the project root is on sys.path so all imports work regardless of CWD
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _ROOT)
+
+# --- Crash / file logging setup (runs before any import that may fail) -------
+_LOG_DIR = os.path.join(_ROOT, "data")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_PATH = os.path.join(_LOG_DIR, "app.log")
+
+_file_handler = RotatingFileHandler(
+    _LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().addHandler(_file_handler)
+
+_crash_log = logging.getLogger("crash")
+
+
+def _log_unhandled(exc_type, exc_value, exc_tb):
+    """sys.excepthook — logs unhandled main-thread exceptions to file."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    _crash_log.critical(
+        "Unhandled exception:\n%s",
+        "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+    )
+
+
+def _log_thread_unhandled(args):
+    """threading.excepthook — logs unhandled exceptions in QThread.run()."""
+    if args.exc_type is SystemExit:
+        return
+    _crash_log.critical(
+        "Unhandled exception in thread %s:\n%s",
+        getattr(args.thread, "name", args.thread),
+        "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_tb)),
+    )
+
+
+sys.excepthook = _log_unhandled
+threading.excepthook = _log_thread_unhandled
+# -----------------------------------------------------------------------------
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
@@ -202,19 +254,27 @@ QCheckBox::indicator:checked {
 
 
 def main():
-    # Enable high-DPI scaling for Windows 11
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    try:
+        _crash_log.info("--- App starting ---")
 
-    app = QApplication(sys.argv)
-    app.setApplicationName("Stock Monitor")
-    app.setOrganizationName("Antika")
-    app.setStyleSheet(FLAT_STYLESHEET)
+        # Enable high-DPI scaling for Windows 11
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    window = MainWindow()
-    window.show()
+        app = QApplication(sys.argv)
+        app.setApplicationName("Stock Monitor")
+        app.setOrganizationName("Antika")
+        app.setStyleSheet(FLAT_STYLESHEET)
 
-    sys.exit(app.exec_())
+        window = MainWindow()
+        window.show()
+
+        code = app.exec_()
+        _crash_log.info("--- App exited cleanly (code %d) ---", code)
+        sys.exit(code)
+    except Exception:
+        _crash_log.critical("Fatal startup error:\n%s", traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":
