@@ -231,6 +231,145 @@ def _build_prompt(
     )
 
 
+# ── Options debate ────────────────────────────────────────────────────────────────
+
+def run_options_debate(
+    symbol: str,
+    scan_result,
+    ai_research: Optional[dict],
+    play: dict,
+    conviction: float,
+    ivr: Optional[float],
+    regime: str,
+    settings: Optional[Dict] = None,
+) -> Tuple[bool, str]:
+    """
+    Evaluate an options play before execution.
+    Returns (proceed, verdict_summary).
+    Fail-safe: API errors return (True, "debate unavailable").
+    """
+    settings = settings or {}
+    api_key  = settings.get("ai_claude_api_key", "").strip()
+    model    = settings.get("debate_model", _DEFAULT_MODEL)
+
+    if not api_key:
+        _log.warning("options_debate: no Claude API key — debate skipped for %s", symbol)
+        return True, "debate skipped — no API key"
+
+    prompt = _build_options_prompt(symbol, scan_result, ai_research, play, conviction, ivr, regime)
+
+    try:
+        payload = json.dumps({
+            "model":      model,
+            "max_tokens": 300,
+            "messages":   [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            _CLAUDE_URL,
+            data=payload,
+            headers={
+                "Content-Type":      "application/json",
+                "x-api-key":         api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+
+        content = body.get("content", [])
+        raw     = content[0].get("text", "").strip() if content else ""
+        usage   = body.get("usage", {})
+        in_tok  = usage.get("input_tokens", 0)
+        out_tok = usage.get("output_tokens", 0)
+        _log_claude_usage(model, in_tok, out_tok, f"options_debate:{symbol}:{regime}")
+
+        verdict, reason = _parse_verdict(raw)
+        _log.info("options_debate [%s] %s %s → %s: %s",
+                  regime.upper(), symbol, play.get("strategy_type", ""), verdict, reason[:100])
+        return (verdict == "BUY"), reason
+
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")[:200]
+        _log.warning("options_debate: Claude API %s for %s — %s — proceeding", exc, symbol, err_body)
+        return True, f"debate unavailable ({exc}) — proceeding"
+    except Exception as exc:
+        _log.warning("options_debate: error for %s (%s) — proceeding", symbol, exc)
+        return True, "debate unavailable — proceeding"
+
+
+def _build_options_prompt(
+    symbol: str,
+    scan_result,
+    ai_research: Optional[dict],
+    play: dict,
+    conviction: float,
+    ivr: Optional[float],
+    regime: str,
+) -> str:
+    strategy     = play.get("strategy_type", "unknown")
+    thesis       = play.get("thesis", "")[:200]
+    max_loss     = play.get("max_loss", 0)
+    net_premium  = play.get("entry_premium_estimate", 0)
+    legs         = play.get("legs", [])
+
+    legs_str = "; ".join(
+        f"{l.get('side', '?').upper()} {l.get('option_type', '?')} "
+        f"${l.get('strike', '?')} exp {l.get('expiration', '?')}"
+        for l in legs
+    )
+
+    rsi     = f"{scan_result.rsi:.0f}" if scan_result.rsi else "n/a"
+    macd    = "bullish" if scan_result.macd_bullish else "not bullish"
+    price   = f"${scan_result.price:.2f}" if scan_result.price else "n/a"
+    sv      = getattr(scan_result, "score_value",     0) or 0
+    sg      = getattr(scan_result, "score_growth",    0) or 0
+    st      = getattr(scan_result, "score_technical", 0) or 0
+
+    sentiment  = ""
+    short_term = ""
+    if ai_research:
+        sentiment  = ai_research.get("sentiment", "")
+        short_term = (ai_research.get("short_term") or "")[:150]
+
+    if ivr is not None:
+        if ivr >= 60:
+            ivr_ctx = f"IVR={ivr:.0f} (HIGH — IV expensive, selling premium is favored)"
+        elif ivr >= 30:
+            ivr_ctx = f"IVR={ivr:.0f} (MODERATE — debit spreads are reasonable)"
+        else:
+            ivr_ctx = f"IVR={ivr:.0f} (LOW — IV cheap, buying options is favorable)"
+    else:
+        ivr_ctx = "IVR=unknown"
+
+    regime_ctx = _REGIME_CONTEXT.get(regime, _REGIME_CONTEXT["neutral"])
+
+    debit_or_credit = "net debit" if net_premium >= 0 else "net credit"
+
+    return (
+        f"You are a senior options risk manager evaluating an options play.\n\n"
+        f"MARKET CONTEXT: {regime_ctx}\n\n"
+        f"UNDERLYING: {symbol} @ {price} | RSI: {rsi} | MACD: {macd}\n"
+        f"Scan sub-scores — Value: {sv:.0f}  Growth: {sg:.0f}  Technical: {st:.0f}\n"
+        f"AI sentiment: {sentiment or 'not available'}\n"
+        f"AI short-term view: {short_term or 'not available'}\n\n"
+        f"OPTIONS PLAY: {strategy.upper()}\n"
+        f"Legs: {legs_str}\n"
+        f"{debit_or_credit.capitalize()}: ${abs(net_premium):.2f}/contract | "
+        f"Max loss: ${max_loss:.0f} total\n"
+        f"{ivr_ctx}\n"
+        f"Conviction score: {conviction:.0f}/100\n"
+        f"Thesis: {thesis}\n\n"
+        f"EVALUATE:\n"
+        f"1. Is {strategy} the right strategy given the IV environment and regime?\n"
+        f"2. Is the directional thesis backed by the technicals/fundamentals above?\n"
+        f"3. Is max loss ${max_loss:.0f} an acceptable risk for this setup?\n\n"
+        f"Respond ONLY with JSON — use BUY to execute, PASS to skip:\n"
+        f'{{"verdict": "BUY", "bull": "...", "bear": "...", "reason": "..."}}'
+    )
+
+
 # ── Response parser ─────────────────────────────────────────────────────────────
 
 def _parse_verdict(raw: str) -> Tuple[str, str]:

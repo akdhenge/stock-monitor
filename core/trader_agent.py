@@ -1110,17 +1110,35 @@ class TraderAgent(QThread):
 
             ivr_str = f"{ivr:.0f}" if ivr is not None else "N/A"
             self._log_step(
-                f"OPTIONS {sym}: {strategy_type} | IVR={ivr_str} conviction={conviction:.1f} | {play['thesis'][:80]}",
-                "trade" if not config.get("dry_run", True) else "ok",
+                f"OPTIONS {sym}: {strategy_type} | IVR={ivr_str} conviction={conviction:.1f} | {play['thesis'][:80]}"
             )
 
+            # Options debate — same Claude gate as stock trades
+            from core.trade_debate import run_options_debate
+            self._log_step(f"OPTIONS {sym}: sending to Claude debate ({regime.label} regime)...")
+            opt_ok, opt_verdict = run_options_debate(
+                symbol=sym,
+                scan_result=scan_result,
+                ai_research=ai_research,
+                play=play,
+                conviction=conviction,
+                ivr=ivr,
+                regime=regime.label,
+                settings=settings,
+            )
+            if not opt_ok:
+                self._log_step(f"OPTIONS {sym}: debate SKIP -- {opt_verdict[:80]}", "skip")
+                continue
+            self._log_step(f"OPTIONS {sym}: debate BUY -- {opt_verdict[:80]}")
+
             if config.get("dry_run", True):
-                self._log_step(f"DRY-RUN OPTIONS {sym} {strategy_type} — no order placed")
+                self._log_step(f"DRY-RUN OPTIONS {sym} {strategy_type} — no order placed", "ok")
                 entries_made += 1
                 continue
 
-            order_ids = self._execute_options_entry(play, config, cycle_id)
+            order_ids, exec_err = self._execute_options_entry(play, config, cycle_id)
             if not order_ids:
+                self._log_step(f"OPTIONS ORDER FAILED {sym} {strategy_type}: {exec_err}", "error")
                 continue
 
             # Persist metadata
@@ -1155,9 +1173,10 @@ class TraderAgent(QThread):
             entries_made += 1
             self._log_step(f"OPTIONS BUY {sym} {strategy_type} placed (conviction {conviction:.1f})", "trade")
 
-    def _execute_options_entry(self, play: dict, config: dict, cycle_id: str) -> list:
-        """Submit orders for all legs of an options play. Returns list of order IDs."""
+    def _execute_options_entry(self, play: dict, config: dict, cycle_id: str) -> tuple:
+        """Submit orders for all legs of an options play. Returns (order_ids, error_str)."""
         order_ids = []
+        errors    = []
         legs = play.get("legs", [])
         strategy_type = play.get("strategy_type", "")
 
@@ -1174,22 +1193,26 @@ class TraderAgent(QThread):
             oid, status = self._options_executor.submit_spread(spread_legs, limit_price=limit)
             if oid:
                 order_ids.append(oid)
+            else:
+                errors.append(f"spread submit failed: {status}")
         else:
             # Submit each leg individually
             for leg in legs:
                 price_estimate = abs(play.get("entry_premium_estimate", 0.01))
                 if leg["side"] == "long":
-                    oid, _ = self._options_executor.buy_option(
+                    oid, status = self._options_executor.buy_option(
                         leg["contract_symbol"], leg["contracts"], price_estimate
                     )
                 else:
-                    oid, _ = self._options_executor.sell_option(
+                    oid, status = self._options_executor.sell_option(
                         leg["contract_symbol"], leg["contracts"], price_estimate
                     )
                 if oid:
                     order_ids.append(oid)
+                else:
+                    errors.append(f"{leg.get('side','?')} leg {leg.get('contract_symbol','?')} failed: {status}")
 
-        return order_ids
+        return order_ids, "; ".join(errors) if errors else "ok"
 
     def _execute_options_exit(self, meta, reason: str, cycle_id: Optional[str]) -> None:
         """Close all legs of an options position."""
@@ -1355,8 +1378,9 @@ class TraderAgent(QThread):
             if config.get("dry_run", True):
                 continue
 
-            oids = self._execute_options_entry(play, config, cycle_id="cc")
+            oids, cc_err = self._execute_options_entry(play, config, cycle_id="cc")
             if not oids:
+                self._log_step(f"COVERED CALL ORDER FAILED {sym}: {cc_err}", "error")
                 continue
 
             position_id = str(uuid.uuid4())[:8]
