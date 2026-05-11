@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self._ai_rank_queue_idx: int = 0   # index of the next researcher to launch
         self._ai_rank_results: Dict[str, Optional[float]] = {}  # symbol -> raw score (None=error)
         self._ai_rank_top10: List[ScanResult] = []  # held for post-ranking finalization
+        self._ai_rank_full_results: List[ScanResult] = []  # full scan batch for trader dispatch
 
         # Trader agent (autonomous paper trading)
         self._trader_agent = None
@@ -357,8 +358,6 @@ class MainWindow(QMainWindow):
         self._scanner.set_previous_top10(self._scanner_top10)
         self._scanner.set_previous_scores(self._scanner_prev_scores)
         self._scanner.deep_scan_complete.connect(self._on_deep_scan_complete)
-        if self._trader_agent is not None:
-            self._scanner.deep_scan_complete.connect(self._trader_agent.queue_scan_results)
         self._scanner.new_alert_entry.connect(self._on_deep_alert_entry)
         self._scanner.scan_progress.connect(self._scanner_panel.update_progress)
         self._scanner.scan_status.connect(self._scanner_panel.update_status)
@@ -381,8 +380,6 @@ class MainWindow(QMainWindow):
         self._scanner.set_previous_top5(self._scanner_top5)
         self._scanner.set_previous_scores(self._scanner_prev_scores)
         self._scanner.complete_scan_complete.connect(self._on_complete_scan_complete)
-        if self._trader_agent is not None:
-            self._scanner.complete_scan_complete.connect(self._trader_agent.queue_scan_results)
         self._scanner.new_top5_entry.connect(self._on_new_top5)
         self._scanner.scan_progress.connect(self._scanner_panel.update_progress)
         self._scanner.scan_status.connect(self._scanner_panel.update_status)
@@ -705,6 +702,7 @@ class MainWindow(QMainWindow):
         top10 = results[:10]
         if not top10:
             return
+        self._ai_rank_full_results = results  # retained so _finalize_ai_ranking can dispatch to trader
 
         refresh_hours = self._settings.get("ai_rank_refresh_hours", 4)
         stale = [r for r in top10 if get_cached_entry(r.symbol) is None]
@@ -853,6 +851,11 @@ class MainWindow(QMainWindow):
         n = len(self._ai_rank_top10)
         self._scanner_panel.set_ai_rank_status(f"AI Ranking complete ✓  ({n} stocks ranked)", "")
         QTimer.singleShot(5000, lambda: self._scanner_panel.set_ai_rank_status("", visible=False))
+
+        # Dispatch to trader only after AI research is current for this scan cycle
+        if self._trader_agent is not None:
+            dispatch = self._ai_rank_full_results or self._ai_rank_top10
+            self._trader_agent.queue_scan_results(dispatch)
 
     # ── Web Command slots ─────────────────────────────────────────────────────
 

@@ -533,8 +533,6 @@ td:nth-child(2) b {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 520px;
-  overflow-y: auto;
   padding-right: 4px;
 }
 

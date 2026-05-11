@@ -48,6 +48,7 @@ _log = logging.getLogger(__name__)
 
 _RANKING_CACHE = os.path.join(os.path.dirname(__file__), "..", "data", "claude_ranking_cache.json")
 _HEARTBEAT_INTERVAL = 900   # 15 minutes
+_MAX_STEPS = 100
 
 
 class TraderAgent(QThread):
@@ -78,8 +79,8 @@ class TraderAgent(QThread):
             "status": status,
         }
         self._steps.append(entry)
-        if len(self._steps) > 30:
-            self._steps = self._steps[-30:]
+        if len(self._steps) > _MAX_STEPS:
+            self._steps = self._steps[-_MAX_STEPS:]
         _log.info("STEP [%s] %s", status, text)
 
     def _write_agent_status(self, status_text: str = "") -> None:
