@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from core import market_clock
-from core.ai_research_store import get_cached_entry
+from core.ai_research_store import get_cached_entry, get_cached_entry_merged
 from core.portfolio import (
     build_entry_meta, delete_position_meta, get_position_meta,
     init_trader_config, load_all_meta, load_trader_config,
@@ -398,9 +398,22 @@ class TraderAgent(QThread):
                              scan_score=scan_result.total_score, nav_at_eval=nav, cycle_id=cycle_id)
                 continue
 
-            ai_research  = get_cached_entry(sym)
+            ai_research  = get_cached_entry_merged(sym)
             ai_rank      = ranked_item.get("rank")
             alloc_pct    = ranked_item.get("allocation_pct")
+
+            # TradingAgents veto: Sell/Underweight blocks entry regardless of technicals.
+            # Never upgrades a bear technical regime — only blocks.
+            if ai_research and ai_research.get("source") == "tradingagents":
+                ta_rating = ai_research.get("ta_rating", "")
+                if ta_rating in ("Sell", "Underweight"):
+                    self._log_step(
+                        f"{sym}: VETOED by TradingAgents ({ta_rating}) — skipping entry", "skip"
+                    )
+                    log_decision(sym, "REJECT", f"TradingAgents veto: {ta_rating}",
+                                 scan_score=scan_result.total_score,
+                                 ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                    continue
 
             # Parse entry/stop/target from ranked_item's stock_play string
             target_price = self._parse_target(ranked_item.get("stock_play", ""), scan_result.price)
@@ -1053,9 +1066,18 @@ class TraderAgent(QThread):
             if scan_result is None:
                 continue
 
-            ai_research = get_cached_entry(sym)
+            ai_research = get_cached_entry_merged(sym)
             ai_rank     = ranked_item.get("rank")
             alloc_pct   = ranked_item.get("allocation_pct")
+
+            # TradingAgents veto: Sell/Underweight blocks options entry regardless of technicals.
+            if ai_research and ai_research.get("source") == "tradingagents":
+                ta_rating = ai_research.get("ta_rating", "")
+                if ta_rating in ("Sell", "Underweight"):
+                    self._log_step(
+                        f"OPTIONS {sym}: VETOED by TradingAgents ({ta_rating}) — skipping", "skip"
+                    )
+                    continue
 
             conviction, _ = compute_conviction_score(scan_result, ai_rank, ai_research, alloc_pct)
 

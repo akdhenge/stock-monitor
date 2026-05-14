@@ -203,6 +203,22 @@ def _build_prompt(
             f"dir={bd.get('direction', 0):.0f} tech={bd.get('tech', 0):.0f}\n"
         )
 
+    # Richer context block when ai_research comes from TradingAgents deep analysis.
+    ta_block = ""
+    if ai_research and ai_research.get("source") == "tradingagents":
+        ta_thesis   = (ai_research.get("ta_investment_thesis") or "")[:400]
+        ta_rational = (ai_research.get("ta_rationale") or "")[:200]
+        ta_rating   = ai_research.get("ta_rating", "n/a")
+        ta_horizon  = ai_research.get("ta_time_horizon") or "n/a"
+        ta_target   = ai_research.get("ta_price_target")
+        ta_target_s = f"${ta_target:.2f}" if ta_target else "n/a"
+        ta_block = (
+            f"\nTRADINGAGENTS DEEP ANALYSIS (multi-agent bull/bear research pipeline):\n"
+            f"Rating: {ta_rating} | Time horizon: {ta_horizon} | Price target: {ta_target_s}\n"
+            f"Investment thesis: {ta_thesis}\n"
+            f"Research rationale: {ta_rational}\n"
+        )
+
     regime_ctx    = _REGIME_CONTEXT.get(regime, _REGIME_CONTEXT["neutral"])
     verdict_guide = _REGIME_VERDICT_GUIDANCE.get(regime, _REGIME_VERDICT_GUIDANCE["neutral"])
 
@@ -220,6 +236,7 @@ def _build_prompt(
         f"AI short-term view: {short_term or 'not available'}\n"
         f"AI long-term view: {long_term or 'not available'}\n"
         f"AI catalysts: {catalysts or 'not available'}\n"
+        f"{ta_block}"
         f"Portfolio analyst rationale: {claude_rationale[:400]}\n"
         f"{bearish_warning}\n"
         f"EVALUATION REQUIRED:\n"
@@ -347,14 +364,31 @@ def _build_options_prompt(
 
     debit_or_credit = "net debit" if net_premium >= 0 else "net credit"
 
+    # Richer context block when ai_research comes from TradingAgents deep analysis.
+    ta_block = ""
+    if ai_research and ai_research.get("source") == "tradingagents":
+        ta_thesis   = (ai_research.get("ta_investment_thesis") or "")[:400]
+        ta_rational = (ai_research.get("ta_rationale") or "")[:200]
+        ta_rating   = ai_research.get("ta_rating", "n/a")
+        ta_horizon  = ai_research.get("ta_time_horizon") or "n/a"
+        ta_target   = ai_research.get("ta_price_target")
+        ta_target_s = f"${ta_target:.2f}" if ta_target else "n/a"
+        ta_block = (
+            f"\nTRADINGAGENTS DEEP ANALYSIS (multi-agent bull/bear research pipeline):\n"
+            f"Rating: {ta_rating} | Time horizon: {ta_horizon} | Price target: {ta_target_s}\n"
+            f"Investment thesis: {ta_thesis}\n"
+            f"Research rationale: {ta_rational}\n"
+        )
+
     return (
         f"You are a senior options risk manager evaluating an options play.\n\n"
         f"MARKET CONTEXT: {regime_ctx}\n\n"
         f"UNDERLYING: {symbol} @ {price} | RSI: {rsi} | MACD: {macd}\n"
         f"Scan sub-scores — Value: {sv:.0f}  Growth: {sg:.0f}  Technical: {st:.0f}\n"
         f"AI sentiment: {sentiment or 'not available'}\n"
-        f"AI short-term view: {short_term or 'not available'}\n\n"
-        f"OPTIONS PLAY: {strategy.upper()}\n"
+        f"AI short-term view: {short_term or 'not available'}\n"
+        f"{ta_block}"
+        f"\nOPTIONS PLAY: {strategy.upper()}\n"
         f"Legs: {legs_str}\n"
         f"{debit_or_credit.capitalize()}: ${abs(net_premium):.2f}/contract | "
         f"Max loss: ${max_loss:.0f} total\n"
