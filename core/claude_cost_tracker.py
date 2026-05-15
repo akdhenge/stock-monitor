@@ -11,10 +11,11 @@ _DATA_DIR  = os.path.join(os.path.dirname(__file__), "..", "data")
 _USAGE_LOG = os.path.join(_DATA_DIR, "claude_usage_log.json")
 
 COST_PER_M: Dict[str, Dict[str, float]] = {
-    "claude-sonnet-4-6":         {"input": 3.00,  "output": 15.00},
-    "claude-opus-4-7":           {"input": 15.00, "output": 75.00},
-    "claude-haiku-4-5-20251001": {"input": 0.80,  "output": 4.00},
-    "claude-haiku-20240307":     {"input": 0.25,  "output": 1.25},
+    "claude-sonnet-4-6":           {"input": 3.00,  "output": 15.00},
+    "claude-3-5-sonnet-20241022":  {"input": 3.00,  "output": 15.00},
+    "claude-opus-4-7":             {"input": 15.00, "output": 75.00},
+    "claude-haiku-4-5-20251001":   {"input": 0.80,  "output": 4.00},
+    "claude-haiku-20240307":       {"input": 0.25,  "output": 1.25},
 }
 _DEFAULT_COST = {"input": 3.00, "output": 15.00}
 

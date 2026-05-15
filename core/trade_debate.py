@@ -27,7 +27,7 @@ from core.claude_cost_tracker import log_usage as _log_claude_usage
 _log = logging.getLogger(__name__)
 
 _CLAUDE_URL     = "https://api.anthropic.com/v1/messages"
-_DEFAULT_MODEL  = "claude-sonnet-4-6"
+_DEFAULT_MODEL  = "claude-haiku-4-5-20251001"
 _TIMEOUT        = 90
 
 

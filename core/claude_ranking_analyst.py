@@ -49,7 +49,7 @@ class ClaudeRankingAnalyst(QThread):
             result = self._parse_response(raw_text)
 
             settings = self._get_settings()
-            model = settings.get("claude_ranking_model", "claude-sonnet-4-6")
+            model = settings.get("claude_ranking_model", "claude-haiku-4-5-20251001")
             cost_usd = compute_cost(model, input_tokens, output_tokens)
 
             result["input_tokens"]  = input_tokens
@@ -185,7 +185,7 @@ class ClaudeRankingAnalyst(QThread):
         import urllib.request
         settings = self._get_settings()
         api_key = settings.get("ai_claude_api_key", "").strip()
-        model   = settings.get("claude_ranking_model", "claude-sonnet-4-6")
+        model   = settings.get("claude_ranking_model", "claude-haiku-4-5-20251001")
         if not api_key:
             raise RuntimeError(
                 "Claude API key not set. Go to Settings → AI and enter your Anthropic API key."
