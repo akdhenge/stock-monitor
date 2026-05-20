@@ -127,12 +127,16 @@ class MainWindow(QMainWindow):
         # Trader agent (autonomous paper trading)
         self._trader_agent = None
 
+        # TradingAgents pre-market batch runner
+        self._ta_batch_runner = None
+
         self._setup_ui()
         self._apply_settings(self._settings)
         self._watchlist_table.refresh(self._watchlist)
 
         QTimer.singleShot(500, self._start_poller)
         QTimer.singleShot(1000, self._start_trader_agent)
+        QTimer.singleShot(2000, self._start_ta_batch_runner)
 
         # 60-second tick for scheduled scans
         self._schedule_timer = QTimer(self)
@@ -1563,6 +1567,9 @@ class MainWindow(QMainWindow):
         if self._trader_agent is not None and self._trader_agent.isRunning():
             self._trader_agent.stop()
             self._trader_agent.wait(5000)
+        if self._ta_batch_runner is not None and self._ta_batch_runner.isRunning():
+            self._ta_batch_runner.stop()
+            self._ta_batch_runner.wait(3000)
         event.accept()
 
     # ── Trader Agent ──────────────────────────────────────────────────────────
@@ -1576,6 +1583,17 @@ class MainWindow(QMainWindow):
         )
         self._trader_agent.agent_halted.connect(self._on_agent_halted)
         self._trader_agent.start()
+
+    def _start_ta_batch_runner(self) -> None:
+        from core.portfolio import load_trader_config
+        if not load_trader_config().get("ta_batch_enabled", False):
+            return
+        from core.ta_batch_runner import TABatchRunner
+        self._ta_batch_runner = TABatchRunner(parent=self)
+        self._ta_batch_runner.batch_status.connect(
+            lambda msg: self._scan_status_label.setText(f"[TA] {msg}")
+        )
+        self._ta_batch_runner.start()
 
     def _on_agent_trade(self, trade: dict) -> None:
         action = trade.get("action", "")

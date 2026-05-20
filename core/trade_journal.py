@@ -43,6 +43,8 @@ def log_decision(
     nav_at_eval: Optional[float] = None,
     macro_regime: Optional[str] = None,
     cycle_id: Optional[str] = None,
+    elapsed_ms: Optional[int] = None,   # total eval time for this candidate
+    debate_ms: Optional[int] = None,    # Claude debate latency (when applicable)
     extra: Optional[Dict] = None,
 ) -> None:
     record: Dict[str, Any] = {
@@ -60,6 +62,8 @@ def log_decision(
     if nav_at_eval     is not None: record["nav_at_eval"]     = round(nav_at_eval, 2)
     if macro_regime    is not None: record["macro_regime"]    = macro_regime
     if cycle_id        is not None: record["cycle_id"]        = cycle_id
+    if elapsed_ms      is not None: record["eval_ms"]         = elapsed_ms
+    if debate_ms       is not None: record["debate_ms"]       = debate_ms
     if extra:                       record.update(extra)
     _append(record)
 
@@ -76,6 +80,7 @@ def log_fill(
     realized_pnl: Optional[float] = None,
     exit_reason: Optional[str] = None,
     cycle_id: Optional[str] = None,
+    exec_ms: Optional[int] = None,     # order submission → fill confirmation latency
 ) -> None:
     record: Dict[str, Any] = {
         "type":       "fill",
@@ -92,6 +97,46 @@ def log_fill(
     if realized_pnl is not None: record["realized_pnl"] = round(realized_pnl, 2)
     if exit_reason  is not None: record["exit_reason"]  = exit_reason
     if cycle_id     is not None: record["cycle_id"]     = cycle_id
+    if exec_ms      is not None: record["exec_ms"]      = exec_ms
+    _append(record)
+
+
+def log_options_decision(
+    symbol: str,
+    action: str,                     # "ENTER" | "REJECT"
+    reason: str,
+    strategy_type: Optional[str] = None,
+    ivr: Optional[float] = None,
+    iv_level: Optional[str] = None,
+    conviction: Optional[float] = None,
+    scan_score: Optional[float] = None,
+    ai_rank: Optional[int] = None,
+    nav_at_eval: Optional[float] = None,
+    macro_regime: Optional[str] = None,
+    cycle_id: Optional[str] = None,
+    elapsed_ms: Optional[int] = None,
+    debate_ms: Optional[int] = None,
+    extra: Optional[Dict] = None,
+) -> None:
+    record: Dict[str, Any] = {
+        "type":       "options_decision",
+        "ts":         datetime.now().astimezone().isoformat(),
+        "symbol":     symbol.upper(),
+        "action":     action.upper(),
+        "reason":     reason,
+    }
+    if strategy_type is not None: record["strategy_type"] = strategy_type
+    if ivr           is not None: record["ivr"]           = round(ivr, 1)
+    if iv_level      is not None: record["iv_level"]      = iv_level
+    if conviction    is not None: record["conviction"]    = round(conviction, 2)
+    if scan_score    is not None: record["scan_score"]    = round(scan_score, 2)
+    if ai_rank       is not None: record["ai_rank"]       = ai_rank
+    if nav_at_eval   is not None: record["nav_at_eval"]   = round(nav_at_eval, 2)
+    if macro_regime  is not None: record["macro_regime"]  = macro_regime
+    if cycle_id      is not None: record["cycle_id"]      = cycle_id
+    if elapsed_ms    is not None: record["eval_ms"]       = elapsed_ms
+    if debate_ms     is not None: record["debate_ms"]     = debate_ms
+    if extra:                     record.update(extra)
     _append(record)
 
 
@@ -107,6 +152,7 @@ def log_options_fill(
     realized_pnl: Optional[float] = None,
     exit_reason: Optional[str] = None,
     cycle_id: Optional[str] = None,
+    exec_ms: Optional[int] = None,
 ) -> None:
     record: Dict[str, Any] = {
         "type":          "fill",
@@ -124,6 +170,7 @@ def log_options_fill(
     if realized_pnl is not None: record["realized_pnl"] = round(realized_pnl, 2)
     if exit_reason  is not None: record["exit_reason"]  = exit_reason
     if cycle_id     is not None: record["cycle_id"]     = cycle_id
+    if exec_ms      is not None: record["exec_ms"]      = exec_ms
     _append(record)
 
 

@@ -40,7 +40,7 @@ from core.risk_manager import (
     check_circuit_breaker, check_exit, check_hard_gates,
     compute_conviction_score, compute_decision_score, compute_sector_exposure, size_position,
 )
-from core.trade_journal import log_decision, log_fill
+from core.trade_journal import log_decision, log_fill, log_options_decision
 from core.performance_tracker import maybe_snapshot
 from core.self_tuner import run_tuning_cycle, should_tune
 
@@ -242,6 +242,7 @@ class TraderAgent(QThread):
         self.agent_status.emit("Trader: evaluating scan results…")
         self._log_step(f"Scan received — {len(results)} stocks to evaluate")
         cycle_id = str(uuid.uuid4())[:8]
+        t_cycle = time.time()
 
         # Fetch VIX + SPY once — used for both regime detection and existing gates
         import yfinance as yf
@@ -382,6 +383,8 @@ class TraderAgent(QThread):
             if not sym or sym in open_symbols:
                 continue
 
+            t_cand = time.time()
+
             scan_result = scan_by_symbol.get(sym)
             if scan_result is None:
                 _log.debug("TraderAgent: %s ranked but not in this scan batch — skipped", sym)
@@ -395,7 +398,8 @@ class TraderAgent(QThread):
                 _log.info("TraderAgent: %s skipped — earnings in %d day(s)", sym, dte)
                 self._log_step(f"{sym}: skipped — earnings in {dte}d (block {block_days}d)", "skip")
                 log_decision(sym, "REJECT", f"earnings in {dte}d (block_days={block_days})",
-                             scan_score=scan_result.total_score, nav_at_eval=nav, cycle_id=cycle_id)
+                             scan_score=scan_result.total_score, nav_at_eval=nav, cycle_id=cycle_id,
+                             elapsed_ms=int((time.time() - t_cand) * 1000))
                 continue
 
             ai_research  = get_cached_entry_merged(sym)
@@ -412,7 +416,8 @@ class TraderAgent(QThread):
                     )
                     log_decision(sym, "REJECT", f"TradingAgents veto: {ta_rating}",
                                  scan_score=scan_result.total_score,
-                                 ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                                 ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id,
+                                 elapsed_ms=int((time.time() - t_cand) * 1000))
                     continue
 
             # Parse entry/stop/target from ranked_item's stock_play string
@@ -435,7 +440,8 @@ class TraderAgent(QThread):
                 self._log_step(f"{sym}: rejected — {reject_reason}", "skip")
                 log_decision(sym, "REJECT", reject_reason,
                              scan_score=scan_result.total_score,
-                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id,
+                             elapsed_ms=int((time.time() - t_cand) * 1000))
                 continue
 
             # 1b. Per-symbol quality gate (soft: score must be near 30d mean)
@@ -444,7 +450,8 @@ class TraderAgent(QThread):
                 self._log_step(f"{sym}: per-symbol gate — {sym_reason}", "skip")
                 log_decision(sym, "REJECT", sym_reason,
                              scan_score=scan_result.total_score,
-                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id,
+                             elapsed_ms=int((time.time() - t_cand) * 1000))
                 continue
 
             # 2. Conviction score — gates entry AND drives sizing
@@ -480,7 +487,8 @@ class TraderAgent(QThread):
                 )
                 log_decision(sym, "REJECT", f"conviction {conviction:.1f} < gate {min_conviction:.1f}",
                              scan_score=scan_result.total_score, decision_score=conviction,
-                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id,
+                             elapsed_ms=int((time.time() - t_cand) * 1000))
                 continue
 
             # 3. Size position (conviction-driven curve + regime multiplier)
@@ -497,7 +505,8 @@ class TraderAgent(QThread):
                 self._log_step(f"{sym}: insufficient cash after reserve — rejected", "skip")
                 log_decision(sym, "REJECT", "insufficient cash after reserve for minimum size",
                              scan_score=scan_result.total_score, decision_score=conviction,
-                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id,
+                             elapsed_ms=int((time.time() - t_cand) * 1000))
                 continue
 
             if spy_regime_factor < 1.0:
@@ -515,12 +524,14 @@ class TraderAgent(QThread):
                          scan_score=scan_result.total_score, decision_score=conviction,
                          ai_rank=ai_rank, size_dollars=dollars, nav_at_eval=nav,
                          ai_sentiment=ai_research.get("sentiment") if ai_research else None,
-                         cycle_id=cycle_id)
+                         cycle_id=cycle_id,
+                         elapsed_ms=int((time.time() - t_cand) * 1000))
 
             # 4. Bull/Bear debate — final check via Claude (regime-aware)
             from core.trade_debate import run_debate
             _bearish_tag = " [BEARISH]" if ai_sentiment == "BEARISH" else ""
             self._log_step(f"{sym}: sending to Claude debate ({regime.label} regime{_bearish_tag})...")
+            t_debate = time.time()
             debate_ok, debate_verdict = run_debate(
                 symbol=sym,
                 scan_result=scan_result,
@@ -531,7 +542,12 @@ class TraderAgent(QThread):
                 regime=regime.label,
                 settings=settings,
             )
+            _debate_ms = int((time.time() - t_debate) * 1000)
             _debate_verdict_str = "BUY" if debate_ok else "PASS"
+            self._log_step(
+                f"{sym}: debate {_debate_verdict_str} ({_debate_ms / 1000:.1f}s)"
+                + (f" -- {debate_verdict[:60]}" if not debate_ok else "")
+            )
             try:
                 hist_log_debate(
                     symbol=sym, conviction=conviction,
@@ -545,12 +561,12 @@ class TraderAgent(QThread):
                 pass
 
             if not debate_ok:
-                self._log_step(f"{sym}: debate SKIP -- {debate_verdict[:80]}", "skip")
                 log_decision(sym, "REJECT", f"debate: {debate_verdict[:120]}",
                              scan_score=scan_result.total_score, decision_score=conviction,
-                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id)
+                             ai_rank=ai_rank, nav_at_eval=nav, cycle_id=cycle_id,
+                             elapsed_ms=int((time.time() - t_cand) * 1000),
+                             debate_ms=_debate_ms)
                 continue
-            self._log_step(f"{sym}: debate BUY -- {debate_verdict[:80]}")
 
             if config.get("dry_run", True):
                 _log.info("DRY-RUN BUY %s $%.0f (score=%.1f) — no order placed", sym, dollars, dec_score)
@@ -1019,7 +1035,8 @@ class TraderAgent(QThread):
         from core.options_strategy import build_options_play
         from core.options_portfolio import save_option_meta, OptionPositionMeta, OptionLeg
         from core.trade_journal import log_options_fill
-        import uuid, yfinance as yf
+        import uuid
+        import yfinance as yf
 
         ranking = self._load_ranking_cache()
         ranked_list = ranking.get("ranked", []) if ranking else []
@@ -1052,6 +1069,11 @@ class TraderAgent(QThread):
         entries_made = 0
         max_options_per_cycle = 2  # cap to avoid overloading on a single scan
 
+        self._log_step(
+            f"OPTIONS EVAL: {min(len(ranked_list), regime.max_candidates)} candidates "
+            f"| regime={regime.label} budget=${budget:.0f}"
+        )
+
         for ranked_item in ranked_list[:regime.max_candidates]:
             if entries_made >= max_options_per_cycle:
                 break
@@ -1077,6 +1099,11 @@ class TraderAgent(QThread):
                     self._log_step(
                         f"OPTIONS {sym}: VETOED by TradingAgents ({ta_rating}) — skipping", "skip"
                     )
+                    log_options_decision(
+                        sym, "REJECT", f"TradingAgents veto: {ta_rating}",
+                        ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                        cycle_id=cycle_id,
+                    )
                     continue
 
             conviction, _ = compute_conviction_score(scan_result, ai_rank, ai_research, alloc_pct)
@@ -1091,6 +1118,19 @@ class TraderAgent(QThread):
                 options_level=options_level,
             )
             if strategy_type is None:
+                _ivr_s = f"{ivr:.0f}" if ivr is not None else "N/A"
+                self._log_step(
+                    f"OPTIONS {sym}: no strategy for regime={regime.label} ivr={_ivr_s} conviction={conviction:.1f} — skip",
+                    "skip",
+                )
+                log_options_decision(
+                    sym, "REJECT",
+                    f"no strategy: regime={regime.label} iv_level={iv_level} conviction={conviction:.1f}",
+                    ivr=ivr, iv_level=iv_level, conviction=conviction,
+                    scan_score=getattr(scan_result, "total_score", None),
+                    ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                    cycle_id=cycle_id,
+                )
                 continue
 
             # Estimate max loss per contract for sizing (use premium * 100 * 1 contract as proxy)
@@ -1103,11 +1143,29 @@ class TraderAgent(QThread):
                 config=config,
             )
             if contracts < 1:
+                self._log_step(
+                    f"OPTIONS {sym}: sizing yielded 0 contracts (conviction={conviction:.1f} budget=${budget:.0f}) — skip",
+                    "skip",
+                )
+                log_options_decision(
+                    sym, "REJECT", "sizing: 0 contracts after initial size",
+                    strategy_type=strategy_type, ivr=ivr, iv_level=iv_level,
+                    conviction=conviction, scan_score=getattr(scan_result, "total_score", None),
+                    ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                    cycle_id=cycle_id,
+                )
                 continue
 
             play = build_options_play(sym, strategy_type, scan_result, contracts)
             if play is None:
                 self._log_step(f"OPTIONS {sym}: could not build {strategy_type} play — no chain data", "skip")
+                log_options_decision(
+                    sym, "REJECT", f"no chain data for {strategy_type}",
+                    strategy_type=strategy_type, ivr=ivr, iv_level=iv_level,
+                    conviction=conviction, scan_score=getattr(scan_result, "total_score", None),
+                    ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                    cycle_id=cycle_id,
+                )
                 continue
 
             # Refine contracts with actual max_loss from play
@@ -1121,11 +1179,29 @@ class TraderAgent(QThread):
                     config=config,
                 )
             if contracts < 1:
+                self._log_step(
+                    f"OPTIONS {sym}: 0 contracts after max-loss refinement — skip", "skip"
+                )
+                log_options_decision(
+                    sym, "REJECT", "sizing: 0 contracts after max-loss refinement",
+                    strategy_type=strategy_type, ivr=ivr, iv_level=iv_level,
+                    conviction=conviction, scan_score=getattr(scan_result, "total_score", None),
+                    ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                    cycle_id=cycle_id,
+                )
                 continue
 
             # Rebuild play with corrected contract count
             play = build_options_play(sym, strategy_type, scan_result, contracts)
             if play is None:
+                self._log_step(f"OPTIONS {sym}: could not rebuild {strategy_type} play — skip", "skip")
+                log_options_decision(
+                    sym, "REJECT", f"rebuild play returned None ({strategy_type})",
+                    strategy_type=strategy_type, ivr=ivr, iv_level=iv_level,
+                    conviction=conviction, scan_score=getattr(scan_result, "total_score", None),
+                    ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                    cycle_id=cycle_id,
+                )
                 continue
 
             play["ivr_at_entry"] = ivr
@@ -1150,8 +1226,22 @@ class TraderAgent(QThread):
             )
             if not opt_ok:
                 self._log_step(f"OPTIONS {sym}: debate SKIP -- {opt_verdict[:80]}", "skip")
+                log_options_decision(
+                    sym, "REJECT", f"debate veto: {opt_verdict[:120]}",
+                    strategy_type=strategy_type, ivr=ivr, iv_level=iv_level,
+                    conviction=conviction, scan_score=getattr(scan_result, "total_score", None),
+                    ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                    cycle_id=cycle_id,
+                )
                 continue
             self._log_step(f"OPTIONS {sym}: debate BUY -- {opt_verdict[:80]}")
+            log_options_decision(
+                sym, "ENTER", f"debate approved: {opt_verdict[:120]}",
+                strategy_type=strategy_type, ivr=ivr, iv_level=iv_level,
+                conviction=conviction, scan_score=getattr(scan_result, "total_score", None),
+                ai_rank=ai_rank, nav_at_eval=nav, macro_regime=regime.label,
+                cycle_id=cycle_id,
+            )
 
             if config.get("dry_run", True):
                 self._log_step(f"DRY-RUN OPTIONS {sym} {strategy_type} — no order placed", "ok")

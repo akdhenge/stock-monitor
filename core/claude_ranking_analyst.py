@@ -75,6 +75,7 @@ class ClaudeRankingAnalyst(QThread):
         for sr in self._scan_results:
             entry: dict = {
                 "symbol":           sr.symbol,
+                "price":            sr.price,
                 "total_score":      sr.total_score,
                 "sector":           sr.sector or "—",
                 "score_value":      sr.score_value,
@@ -117,7 +118,8 @@ class ClaudeRankingAnalyst(QThread):
             "each with fundamental data and (where available) individual AI research. Your tasks:",
             "",
             "1. Rank them 1–10 (1 = strongest near-term buy opportunity).",
-            "2. For each stock: 2-sentence rationale, a concrete stock play (entry price zone / target / stop-loss),",
+            "2. For each stock: 2-sentence rationale, a concrete stock play (entry price zone anchored to the Current Price shown,",
+            "   plus target and stop-loss in absolute dollars),",
             "   an options play if applicable (specific spread or contract), and risk level (Low/Medium/High).",
             "3. Suggest portfolio allocation % for the top 5 only (must sum to 100% across those 5).",
             "   Set allocation_pct to null for ranks 6–10.",
@@ -127,7 +129,8 @@ class ClaudeRankingAnalyst(QThread):
             "--- STOCK DATA ---",
         ]
         for i, s in enumerate(enriched, 1):
-            lines.append(f"\n[{i}] {s['symbol']} | Sector: {s['sector']} | Composite Score: {s['total_score']:.1f}")
+            price_str = f"${s['price']:.2f}" if s.get("price") else "N/A"
+            lines.append(f"\n[{i}] {s['symbol']} | Sector: {s['sector']} | Composite Score: {s['total_score']:.1f} | Current Price: {price_str}")
             lines.append(
                 f"    Fundamentals — PE: {s['pe_ratio'] or '—'}  PEG: {s['peg_ratio'] or '—'}  "
                 f"ROE: {s['roe'] or '—'}  D/E: {s['debt_equity'] or '—'}  "
