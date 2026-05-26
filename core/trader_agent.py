@@ -218,26 +218,51 @@ class TraderAgent(QThread):
 
             if msg_type == "stop":
                 break
-            elif msg_type == "scan":
-                self._process_scan(data)
-                self._process_options_scan(data)
-            elif msg_type == "prices":
-                self._process_price_tick(data)
-            elif msg_type == "sell":
-                self._process_forced_sell(data)
+            try:
+                if msg_type == "scan":
+                    vix_val, spy_hist = self._process_scan(data)
+                    self._process_options_scan(data, vix_val=vix_val, spy_hist=spy_hist)
+                elif msg_type == "prices":
+                    self._process_price_tick(data)
+                elif msg_type == "sell":
+                    self._process_forced_sell(data)
+            except Exception:
+                _log.exception("TraderAgent: unhandled error processing msg_type=%r — continuing", msg_type)
 
         _log.info("TraderAgent: stopped")
         self.agent_status.emit("Trader: stopped")
 
     # ── Scan processing (entry logic) ─────────────────────────────────────────
 
-    def _process_scan(self, results: list) -> None:
+    @staticmethod
+    def _fetch_vix_spy(timeout: float = 30.0):
+        """Fetch VIX and SPY history with a hard timeout so yfinance can't hang the thread."""
+        import concurrent.futures
+        import yfinance as yf
+
+        def _do_fetch():
+            vix = float(yf.Ticker("^VIX").fast_info.last_price or 20.0)
+            spy = yf.Ticker("SPY").history(period="1y", interval="1d")
+            return vix, spy
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(_do_fetch)
+                return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            _log.warning("TraderAgent: VIX/SPY fetch timed out after %.0fs", timeout)
+            return None, None
+        except Exception as exc:
+            _log.warning("TraderAgent: VIX/SPY fetch failed: %s", exc)
+            return None, None
+
+    def _process_scan(self, results: list):
         config = load_trader_config()
         if not config.get("enabled", False):
-            return
+            return None, None
         if not market_clock.is_rth():
             _log.debug("TraderAgent: scan received outside RTH — skipping entries")
-            return
+            return None, None
 
         self.agent_status.emit("Trader: evaluating scan results…")
         self._log_step(f"Scan received — {len(results)} stocks to evaluate")
@@ -245,16 +270,9 @@ class TraderAgent(QThread):
         t_cycle = time.time()
 
         # Fetch VIX + SPY once — used for both regime detection and existing gates
-        import yfinance as yf
         from core.market_regime import detect_regime, format_regime_log
 
-        vix_val  = None
-        spy_hist = None
-        try:
-            vix_val  = float(yf.Ticker("^VIX").fast_info.last_price or 20.0)
-            spy_hist = yf.Ticker("SPY").history(period="1y", interval="1d")
-        except Exception as exc:
-            _log.warning("TraderAgent: VIX/SPY fetch failed: %s", exc)
+        vix_val, spy_hist = self._fetch_vix_spy()
 
         # VIX halt gate
         vix_threshold = config.get("vix_halt_threshold", 30.0)
@@ -263,7 +281,7 @@ class TraderAgent(QThread):
             self._log_step(f"VIX: {vix_val:.1f} > {vix_threshold:.0f} — entries paused (high fear)", "warn")
             self.agent_status.emit(f"Trader: VIX {vix_val:.1f} > {vix_threshold:.0f} — entries paused")
             self._write_agent_status()
-            return
+            return vix_val, spy_hist
         elif vix_val:
             self._log_step(f"VIX: {vix_val:.1f}")
 
@@ -602,6 +620,7 @@ class TraderAgent(QThread):
         self.agent_status.emit(f"Trader: {summary}")
         self._log_step(summary)
         self._write_agent_status()
+        return vix_val, spy_hist
 
     # ── Price-tick processing (exit logic) ────────────────────────────────────
 
@@ -1005,10 +1024,11 @@ class TraderAgent(QThread):
             _log.warning("OptionsExecutor init failed: %s", exc)
             return None
 
-    def _process_options_scan(self, results: list) -> None:
+    def _process_options_scan(self, results: list, *, vix_val=None, spy_hist=None) -> None:
         """
         Options entry logic — runs after _process_scan() on the same scan batch.
         Evaluates the same ranked candidates through the options strategy router.
+        vix_val/spy_hist are passed from _process_scan to avoid a duplicate yfinance fetch.
         """
         config = load_trader_config()
         if not config.get("options_enabled", False):
@@ -1036,7 +1056,6 @@ class TraderAgent(QThread):
         from core.options_portfolio import save_option_meta, OptionPositionMeta, OptionLeg
         from core.trade_journal import log_options_fill
         import uuid
-        import yfinance as yf
 
         ranking = self._load_ranking_cache()
         ranked_list = ranking.get("ranked", []) if ranking else []
@@ -1045,11 +1064,10 @@ class TraderAgent(QThread):
 
         scan_by_symbol = {r.symbol: r for r in results if hasattr(r, "symbol")}
 
-        try:
-            vix_val  = float(yf.Ticker("^VIX").fast_info.last_price or 20.0)
-            spy_hist = yf.Ticker("SPY").history(period="1y", interval="1d")
-        except Exception:
-            vix_val, spy_hist = 20.0, None
+        if vix_val is None or spy_hist is None:
+            vix_val, spy_hist = self._fetch_vix_spy()
+        if vix_val is None:
+            vix_val = 20.0
 
         from core.market_regime import detect_regime, format_regime_log
         regime = detect_regime(spy_hist, vix_val)
