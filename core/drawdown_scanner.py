@@ -201,7 +201,7 @@ class DrawdownScanner(QThread):
 
         # ── Gate 5: LLM cause classification ─────────────────────────────────
         self.scan_status.emit(f"Gate 5: LLM cause classification ({len(g1_survivors)} symbols)...")
-        g5_survivors, g5_data = self._gate5_llm(g1_survivors, g1_data)
+        g5_survivors, g5_data = self._gate5_llm(g1_survivors, g1_data, g2_data)
         g5_misses = set(g1_survivors) - set(g5_survivors)
         for sym in g5_misses:
             d = {**g2_data.get(sym, {}), **g3_data.get(sym, {}),
@@ -234,9 +234,17 @@ class DrawdownScanner(QThread):
 
     def _fetch_sp500(self) -> List[str]:
         try:
+            import io
             import pandas as pd
+            import urllib.request
             url, tbl_idx, col = _SP500_URL
-            tables = pd.read_html(url)
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; stock-monitor/1.0)"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode("utf-8")
+            tables = pd.read_html(io.StringIO(html))
             symbols = [
                 str(s).replace(".", "-").strip().upper()
                 for s in tables[tbl_idx][col].tolist()
@@ -535,6 +543,7 @@ class DrawdownScanner(QThread):
         self,
         symbols: List[str],
         g1_data: Dict[str, Dict],
+        g2_data: Optional[Dict[str, Dict]] = None,
     ) -> Tuple[List[str], Dict[str, Dict]]:
         survivors: List[str] = []
         data: Dict[str, Dict] = {}
@@ -559,10 +568,7 @@ class DrawdownScanner(QThread):
             self.scan_status.emit(f"Gate 5: Classifying {sym} ({i+1}/{len(symbols)})...")
 
             headlines = self._fetch_news_headlines(sym)
-            pct_below = 0.0
-            for gd in [g1_data]:
-                if sym in gd:
-                    pct_below = gd[sym].get("pct_below_high", pct_below)
+            pct_below = (g2_data or {}).get(sym, {}).get("pct_below_high", 0.0)
 
             classification = self._call_deepseek_classify(sym, pct_below, headlines, api_key)
             data[sym] = classification
