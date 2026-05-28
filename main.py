@@ -19,18 +19,32 @@ _LOG_DIR = os.path.join(_ROOT, "data")
 os.makedirs(_LOG_DIR, exist_ok=True)
 _LOG_PATH = os.path.join(_LOG_DIR, "app.log")
 
+# Use delay=True so the file isn't opened until the first write — reduces
+# PermissionError on Windows when a previous instance still holds the handle.
 _file_handler = RotatingFileHandler(
-    _LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    _LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8", delay=True
 )
 _file_handler.setLevel(logging.DEBUG)
-_file_handler.setFormatter(
-    logging.Formatter(
-        "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+_fmt = logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
+_file_handler.setFormatter(_fmt)
 logging.getLogger().setLevel(logging.DEBUG)
 logging.getLogger().addHandler(_file_handler)
+
+# Separate crash log — plain append, never rotated, always writable even when
+# app.log is locked by another instance.
+_CRASH_PATH = os.path.join(_LOG_DIR, "crash.log")
+_crash_handler = logging.FileHandler(_CRASH_PATH, encoding="utf-8", delay=True)
+_crash_handler.setLevel(logging.WARNING)
+_crash_handler.setFormatter(_fmt)
+logging.getLogger().addHandler(_crash_handler)
+
+# Direct faulthandler to crash.log so segfaults/native Qt crashes are captured
+# even when app.log rotation is blocked.
+_crash_file = open(_CRASH_PATH, "a", encoding="utf-8")
+faulthandler.enable(file=_crash_file)
 
 _crash_log = logging.getLogger("crash")
 
@@ -61,8 +75,6 @@ sys.excepthook = _log_unhandled
 threading.excepthook = _log_thread_unhandled
 
 # Dump a native stack trace to app.log on segfault/abort (catches Qt C++ crashes)
-_fault_log = open(_LOG_PATH, "a", encoding="utf-8")
-faulthandler.enable(file=_fault_log)
 # -----------------------------------------------------------------------------
 
 from PyQt5.QtWidgets import QApplication
