@@ -111,6 +111,7 @@ class DrawdownScanner(QThread):
     scan_progress = pyqtSignal(int)    # 0-100
     scan_status   = pyqtSignal(str)
     scan_error    = pyqtSignal(str)
+    scan_cost     = pyqtSignal(dict)   # cost breakdown dict emitted at end of scan
 
     def __init__(self, settings: Dict[str, Any], parent=None):
         super().__init__(parent)
@@ -135,6 +136,13 @@ class DrawdownScanner(QThread):
     def _do_scan(self) -> None:
         results: List[DrawdownResult] = []
         close_misses: List[DrawdownResult] = []
+        self._cost: Dict[str, Any] = {
+            "deepseek_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "finnhub_calls": 0,
+        }
 
         # ── Fetch universe ────────────────────────────────────────────────────
         self.scan_status.emit("Fetching S&P 500 universe...")
@@ -160,6 +168,8 @@ class DrawdownScanner(QThread):
         self.scan_status.emit(f"Gate 3: Checking fundamentals ({len(g2_survivors)} symbols)...")
         finnhub = self._make_finnhub()
         g3_survivors, g3_data = self._gate3_fundamentals(g2_survivors, g2_data, finnhub)
+        # Each survivor gets 1 Finnhub earnings call
+        self._cost["finnhub_calls"] += len(g2_survivors) if finnhub else 0
         g3_misses = set(g2_survivors) - set(g3_survivors)
         for sym in g3_misses:
             d = g2_data.get(sym, {})
@@ -174,6 +184,8 @@ class DrawdownScanner(QThread):
         # ── Gate 4: Analyst conviction ────────────────────────────────────────
         self.scan_status.emit(f"Gate 4: Checking analyst conviction ({len(g3_survivors)} symbols)...")
         g4_survivors, g4_data = self._gate4_analyst(g3_survivors, g3_data, finnhub)
+        # Each Gate 3 survivor gets 1 Finnhub recommendations call
+        self._cost["finnhub_calls"] += len(g3_survivors) if finnhub else 0
         g4_misses = set(g3_survivors) - set(g4_survivors)
         for sym in g4_misses:
             d = {**g2_data.get(sym, {}), **g3_data.get(sym, {})}
@@ -228,6 +240,7 @@ class DrawdownScanner(QThread):
         self.scan_status.emit(
             f"Complete: {len(results)} candidates, {len(close_misses)} near-misses"
         )
+        self.scan_cost.emit(dict(self._cost))
         self.scan_complete.emit(results + close_misses)
 
     # ── Universe fetch ────────────────────────────────────────────────────────
@@ -657,6 +670,16 @@ class DrawdownScanner(QThread):
                 if not choices:
                     raise ValueError("Empty choices in DeepSeek response")
                 content = choices[0].get("message", {}).get("content", "")
+                # Accumulate token usage
+                usage = body.get("usage", {})
+                in_tok  = usage.get("prompt_tokens", 0)
+                out_tok = usage.get("completion_tokens", 0)
+                # DeepSeek-chat pricing: $0.27/1M input, $1.10/1M output
+                cost = (in_tok / 1_000_000) * 0.27 + (out_tok / 1_000_000) * 1.10
+                self._cost["deepseek_calls"] += 1
+                self._cost["input_tokens"]   += in_tok
+                self._cost["output_tokens"]  += out_tok
+                self._cost["cost_usd"]       += cost
                 return self._parse_classification(content)
         except Exception as exc:
             _log.warning("DeepSeek classify failed for %s: %s", symbol, exc)

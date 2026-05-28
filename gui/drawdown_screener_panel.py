@@ -159,6 +159,22 @@ class DrawdownScreenerPanel(QWidget):
         disc.setStyleSheet("color: #888; font-size: 10px;")
         root.addWidget(disc)
 
+        # Cost summary bar
+        cost_row = QHBoxLayout()
+        cost_lbl = QLabel("Last run cost:")
+        cost_lbl.setStyleSheet("color: #666; font-size: 10px;")
+        self._cost_deepseek = QLabel("DeepSeek: —")
+        self._cost_finnhub  = QLabel("Finnhub: —")
+        self._cost_tokens   = QLabel("Tokens: —")
+        for w in (self._cost_deepseek, self._cost_finnhub, self._cost_tokens):
+            w.setStyleSheet("color: #444; font-size: 10px; padding: 0 8px;")
+        cost_row.addWidget(cost_lbl)
+        cost_row.addWidget(self._cost_deepseek)
+        cost_row.addWidget(self._cost_finnhub)
+        cost_row.addWidget(self._cost_tokens)
+        cost_row.addStretch()
+        root.addLayout(cost_row)
+
         # Splitter: tables top, detail pane bottom
         splitter = QSplitter(Qt.Vertical)
 
@@ -213,6 +229,22 @@ class DrawdownScreenerPanel(QWidget):
 
     def update_progress(self, pct: int) -> None:
         self._progress.setValue(pct)
+
+    def update_cost(self, cost: dict) -> None:
+        calls   = cost.get("deepseek_calls", 0)
+        in_tok  = cost.get("input_tokens", 0)
+        out_tok = cost.get("output_tokens", 0)
+        usd     = cost.get("cost_usd", 0.0)
+        fh      = cost.get("finnhub_calls", 0)
+
+        if calls == 0:
+            self._cost_deepseek.setText("DeepSeek: skipped")
+        else:
+            self._cost_deepseek.setText(
+                f"DeepSeek: {calls} calls  ${usd:.4f}"
+            )
+        self._cost_finnhub.setText(f"Finnhub: {fh} calls (free)")
+        self._cost_tokens.setText(f"Tokens: {in_tok:,} in / {out_tok:,} out")
 
     def set_scan_running(self) -> None:
         self._btn_run.setEnabled(False)

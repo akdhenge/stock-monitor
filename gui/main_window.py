@@ -418,6 +418,7 @@ class MainWindow(QMainWindow):
         from core.drawdown_scanner import DrawdownScanner
         self._drawdown_scanner = DrawdownScanner(settings=self._settings)
         self._drawdown_scanner.scan_complete.connect(self._on_drawdown_complete)
+        self._drawdown_scanner.scan_cost.connect(self._drawdown_panel.update_cost)
         self._drawdown_scanner.scan_progress.connect(self._drawdown_panel.update_progress)
         self._drawdown_scanner.scan_status.connect(self._drawdown_panel.set_status)
         self._drawdown_scanner.scan_error.connect(
