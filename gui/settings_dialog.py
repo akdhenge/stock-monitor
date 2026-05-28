@@ -354,6 +354,32 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(cong_box)
 
+        # Drawdown Screener
+        dd_box = QGroupBox("Drawdown Screener (DeepSeek + Finnhub)")
+        dd_form = QFormLayout(dd_box)
+
+        self._deepseek_api_key = QLineEdit(
+            self._settings.get("deepseek_api_key", "")
+        )
+        self._deepseek_api_key.setEchoMode(QLineEdit.Password)
+        self._deepseek_api_key.setPlaceholderText("sk-…  (from platform.deepseek.com)")
+        dd_form.addRow("DeepSeek API Key:", self._deepseek_api_key)
+
+        self._deepseek_model = QLineEdit(
+            self._settings.get("deepseek_model", "deepseek-chat")
+        )
+        self._deepseek_model.setPlaceholderText("deepseek-chat")
+        dd_form.addRow("DeepSeek Model:", self._deepseek_model)
+
+        self._finnhub_api_key = QLineEdit(
+            self._settings.get("finnhub_api_key", "")
+        )
+        self._finnhub_api_key.setEchoMode(QLineEdit.Password)
+        self._finnhub_api_key.setPlaceholderText("Free key from finnhub.io")
+        dd_form.addRow("Finnhub API Key:", self._finnhub_api_key)
+
+        layout.addWidget(dd_box)
+
         layout.addStretch()
 
         note = QLabel(
@@ -510,6 +536,9 @@ class SettingsDialog(QDialog):
             "r2_secret_access_key": self._r2_secret_key.text().strip(),
             "r2_bucket": self._r2_bucket.text().strip(),
             "r2_public_base_url": self._r2_public_base_url.text().strip(),
+            "deepseek_api_key":   self._deepseek_api_key.text().strip(),
+            "deepseek_model":     self._deepseek_model.text().strip(),
+            "finnhub_api_key":    self._finnhub_api_key.text().strip(),
         })
         save_settings(self._settings)
         self.accept()

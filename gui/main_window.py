@@ -33,6 +33,7 @@ from gui.claude_ranking_dialog import ClaudeRankingDialog
 from gui.alert_history_panel import AlertHistoryPanel
 from gui.log_panel import LogPanel, setup_log_handler
 from gui.settings_dialog import SettingsDialog
+from gui.drawdown_screener_panel import DrawdownScreenerPanel
 from gui.smart_scanner_panel import SmartScannerPanel
 from gui.watchlist_table import WatchlistTable
 from notifiers.email_notifier import EmailNotifier
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
 
         # Scanner state
         self._scanner: Optional[StockScanner] = None
+        self._drawdown_scanner = None  # DrawdownScanner QThread
         self._lookup_worker: Optional[TickerLookupWorker] = None
         self._scanner_top5:  Set[str] = set()
         self._scanner_top10: Set[str] = set()
@@ -230,7 +232,13 @@ class MainWindow(QMainWindow):
         self._scanner_panel.lookup_ticker_requested.connect(self._on_lookup_requested)
         self._tabs.addTab(self._scanner_panel, "Smart Scanner")
 
-        # Tab 3 — Logs
+        # Tab 3 — Drawdown Screener
+        self._drawdown_panel = DrawdownScreenerPanel()
+        self._drawdown_panel.request_scan.connect(self._trigger_drawdown_scan)
+        self._drawdown_panel.request_cancel.connect(self._cancel_drawdown_scan)
+        self._tabs.addTab(self._drawdown_panel, "Drawdown Screener")
+
+        # Tab 4 — Logs
         self._log_panel = LogPanel()
         self._log_handler = setup_log_handler(self._log_panel)
         self._tabs.addTab(self._log_panel, "Logs")
@@ -401,6 +409,36 @@ class MainWindow(QMainWindow):
             self._scanner.wait()
         self._scanner_panel.set_scan_idle("Cancelled")
         self._scan_status_label.setText("Scan cancelled.")
+
+    # ── Drawdown Screener ──────────────────────────────────────────────────────
+
+    def _trigger_drawdown_scan(self) -> None:
+        if self._drawdown_scanner is not None and self._drawdown_scanner.isRunning():
+            return
+        from core.drawdown_scanner import DrawdownScanner
+        self._drawdown_scanner = DrawdownScanner(settings=self._settings)
+        self._drawdown_scanner.scan_complete.connect(self._on_drawdown_complete)
+        self._drawdown_scanner.scan_progress.connect(self._drawdown_panel.update_progress)
+        self._drawdown_scanner.scan_status.connect(self._drawdown_panel.set_status)
+        self._drawdown_scanner.scan_error.connect(
+            lambda msg: self._drawdown_panel.set_status(f"Error: {msg}")
+        )
+        self._drawdown_panel.set_scan_running()
+        self._drawdown_panel.set_status("Starting screener...")
+        self._drawdown_scanner.start()
+
+    def _cancel_drawdown_scan(self) -> None:
+        if self._drawdown_scanner is not None and self._drawdown_scanner.isRunning():
+            self._drawdown_scanner.stop()
+        self._drawdown_panel.set_scan_idle()
+        self._drawdown_panel.set_status("Cancelled.")
+
+    def _on_drawdown_complete(self, results: list) -> None:
+        self._drawdown_panel.display_results(results)
+        candidates = [r for r in results if r.failed_gate is None]
+        self._drawdown_panel.set_status(
+            f"Done: {len(candidates)} candidates, {len(results) - len(candidates)} near-misses"
+        )
 
     # ── Ticker Lookup ──────────────────────────────────────────────────────────
 
