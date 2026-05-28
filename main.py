@@ -4,6 +4,7 @@ import logging
 import threading
 import traceback
 import warnings
+import faulthandler
 from logging.handlers import RotatingFileHandler
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="boto3")
@@ -58,6 +59,10 @@ def _log_thread_unhandled(args):
 
 sys.excepthook = _log_unhandled
 threading.excepthook = _log_thread_unhandled
+
+# Dump a native stack trace to app.log on segfault/abort (catches Qt C++ crashes)
+_fault_log = open(_LOG_PATH, "a", encoding="utf-8")
+faulthandler.enable(file=_fault_log)
 # -----------------------------------------------------------------------------
 
 from PyQt5.QtWidgets import QApplication
