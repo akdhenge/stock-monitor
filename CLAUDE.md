@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 py -3.12 main.py
 ```
 
-Use `py -3.9` (not `python`) — this machine uses the Windows Python Launcher and has multiple Python versions installed. All dependencies (PyQt5, yfinance, etc.) are installed under Python 3.9.
+Use `py -3.12` (not `python`) — this machine uses the Windows Python Launcher and has multiple Python versions installed. All dependencies (PyQt5, yfinance, etc.) are installed under Python 3.12.
 
 There are no automated tests or lint commands set up for this project.
 
@@ -26,6 +26,7 @@ Every long-running operation is a `QThread` subclass. All cross-component commun
 | `StockScanner` | `core/stock_scanner.py` | Runs quick/deep/complete scans; emits scan results and alert signals |
 | `AIResearcher` | `core/ai_researcher.py` | Fetches enrichment data and calls LLM; emits `research_complete` / `research_error` |
 | `TelegramCommandPoller` | `notifiers/telegram_command_poller.py` | Long-polls Telegram getUpdates; emits typed signals per command |
+| `DrawdownScanner` *(extra module)* | `core/drawdown_scanner.py` | Screens S&P 500 through 5 sequential gates; emits `scan_complete` with ranked `DrawdownResult` list |
 
 All threads use the pattern: loop with `self._running` flag, sleep in 1-second chunks so `stop()` is responsive.
 
@@ -82,7 +83,35 @@ Results are cached for 6 hours in `data/ai_research_cache.json`. The `AIResearch
 
 - `ScanResult` (`core/scan_result.py`) — dataclass with all scored fields; `scan_mode` is `"quick"`, `"deep"`, or `"complete"`
 - `StockEntry` / `AlertRecord` (`core/models.py`) — watchlist entry and alert history
+- `DrawdownResult` (`core/drawdown_result.py`) *(extra module)* — dataclass for drawdown screener candidates; includes `failed_gate` field to distinguish close-misses from passed candidates
 - Settings dict keys are defined in `_DEFAULTS` in `core/settings_store.py`
+
+### Drawdown Screener *(extra module — fully isolated)*
+
+**Files:** `core/drawdown_result.py`, `core/drawdown_scanner.py`, `core/finnhub_client.py`, `gui/drawdown_screener_panel.py`
+
+**What it does:** Screens S&P 500 for stocks down 20–50% from a recent high due to sentiment concerns (not fundamental damage). Five sequential gates filter from ~500 symbols to ~5–20 ranked candidates.
+
+**Gate order (cheapest API first):**
+
+| Gate | Filter | Source |
+|---|---|---|
+| Gate 2 | 20–50% below 52w high, within 180 days | yfinance batch download |
+| Gate 3 | Rev growth > 10%, op. cash flow > 0, market cap > $10B, earnings beat | yfinance + Finnhub |
+| Gate 4 | Analyst upside > 25%, Buy% ≥ 70%, ≥ 10 analysts | yfinance + Finnhub |
+| Gate 1 | Options chains exist at 6m and 12m expirations | yfinance `.options` |
+| Gate 5 | LLM classifies drop cause as non-fundamental | DeepSeek API + Alpaca news |
+
+**Gate 5 is optional** — if `deepseek_api_key` is not set, it is skipped and all Gate 1–4 survivors are returned without a cause label.
+
+**Composite score:** `analyst_upside×0.40 + fundamentals×0.25 + drawdown_bell×0.20 + options×0.15`
+Drawdown attractiveness uses a Gaussian bell peaking at ~27% below the high.
+
+**Isolation:** Zero changes to existing scanner, scan_result, AI researcher, or watchlist code. Removing this module requires deleting 4 files and 3 lines from `main_window.py`.
+
+**Settings keys added:** `deepseek_api_key`, `deepseek_model`, `finnhub_api_key`, `drawdown_min_market_cap_b`
+
+**Cause taxonomy** — acceptable (pass): `capex_concern`, `margin_pressure`, `sector_rotation`, `one_time_legal`, `macro_panic`, `guidance_cut`, `unclear`. Unacceptable (reject): `demand_decline`, `share_loss`, `product_failure`, `accounting`, `exec_departure`, `existential_regulatory`, `secular_decline`.
 
 ### Telegram Message Conventions
 

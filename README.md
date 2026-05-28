@@ -11,12 +11,13 @@ A PyQt5 desktop app for monitoring a personal stock watchlist, running automated
 - **AI Research** — Generate a detailed LLM-written research report for any stock (supports Ollama, Claude API, or OpenRouter)
 - **Telegram Bot** — Full remote control: add/remove stocks, trigger scans, run AI research, get alerts — all from Telegram
 - **Congressional Trading Signal** — Bonus scoring signal based on tracked politicians' recent buy/sell disclosures
+- **Drawdown Screener** *(extra module)* — Finds quality stocks hammered by sentiment-driven, non-fundamental concerns; ranked candidate list with LLM cause classification
 
 ---
 
 ## Requirements
 
-- Python 3.9 (dependencies are pinned to 3.9; does **not** work on 3.12+)
+- Python 3.12
 - Windows (tested on Windows 11)
 
 Install dependencies:
@@ -36,16 +37,16 @@ ollama pull gemma4:26b
 ## Running the App
 
 ```bash
-py -3.9 main.py
+py -3.12 main.py
 ```
 
-On Windows with multiple Python versions, use the launcher (`py -3.9`) to ensure the right interpreter.
+On Windows with multiple Python versions, use the launcher (`py -3.12`) to ensure the right interpreter.
 
 ---
 
 ## App Interface
 
-The app has two main tabs accessible from the top of the window.
+The app has four main tabs: Watchlist, Smart Scanner, Drawdown Screener, and Logs.
 
 ### Toolbar Buttons
 
@@ -142,6 +143,77 @@ All sub-scores are on a 0–100 scale. Higher is better.
 
 ---
 
+### Tab 3 — Drawdown Screener *(extra module)*
+
+> **What it is:** A candidate-finder that screens the S&P 500 for quality stocks that have dropped significantly from a recent high due to a **sentiment-driven, non-fundamental concern** — where the underlying business is intact and analyst conviction has not followed the price down.
+>
+> **What it is not:** An auto-trader, an alpha guarantee, or a substitute for your own judgment. Final trade decisions stay with you. Backtest before trading real money.
+
+#### The thesis
+
+A specific, repeatable setup:
+- Stock is 20–50% below its **recent** 52-week high (set within the last 6 months)
+- Business fundamentals are intact — revenue growing, earnings beat
+- The drop has a **named, non-fundamental cause** (capex fear, sector rotation, one-time event, macro panic)
+- Analyst consensus has **not fallen with the price** — targets imply large upside, ratings overwhelmingly Buy
+
+The signature: a company beats earnings *and the stock still drops* because the market is repricing a sentiment concern, not a fundamentals concern. That divergence is the signal.
+
+#### Five sequential gates (run cheapest-first)
+
+| Gate | What it checks | Data source |
+|---|---|---|
+| **Gate 2** *(runs first)* | 20–50% below 52w high, high set within 180 days | yfinance batch download |
+| **Gate 3** | Revenue growth > 10% YoY, positive operating cash flow, market cap > $10B, earnings beat | yfinance + Finnhub |
+| **Gate 4** | Analyst consensus target implies > 25% upside, ≥ 70% Buy ratings, ≥ 10 analysts covering | yfinance + Finnhub |
+| **Gate 1** | Options chains exist at 6-month and 12-month expirations | yfinance options |
+| **Gate 5** | LLM classifies the cause of the drop as sentiment-driven, not fundamental | DeepSeek API + Alpaca news |
+
+Gate 5 is optional — if no DeepSeek API key is configured, it is skipped and all quantitative survivors are shown without a cause label.
+
+#### Acceptable vs. unacceptable drop causes (Gate 5)
+
+| Acceptable (pass) | Unacceptable (reject) |
+|---|---|
+| Capex / investment concern | Demand decline / volume miss |
+| Margin pressure from cost side | Competitive share loss |
+| Sector rotation / multiple compression | Product failure or recall |
+| One-time legal / regulatory event | Accounting irregularity |
+| Macro / broad market panic | Executive departure under bad circumstances |
+| Single guidance cut on non-core metric | Existential regulatory threat |
+| Unclear (passes with low confidence) | Secular industry decline |
+
+#### Composite score (0–100)
+
+```
+Score = Analyst Upside × 40% + Fundamentals × 25% + Drawdown Attractiveness × 20% + Options Liquidity × 15%
+```
+
+Drawdown attractiveness peaks at ~27% below the high (bell curve — both shallow and deep drawdowns score lower).
+
+#### Output
+
+- **Ranked Candidates table** — all stocks that passed all 5 gates, sorted by score
+- **Rejected-but-Close list** — stocks that passed 4 of 5 gates (worth monitoring; may qualify next run)
+- **Detail pane** — click any row to see full metrics, sub-scores, and the LLM cause summary
+
+#### Setup required
+
+1. Get a free Finnhub API key at **finnhub.io** (no credit card required)
+2. Get a DeepSeek API key at **platform.deepseek.com** (very cheap — ~$0.02 per full scan run)
+3. Enter both in **Settings → AI → Drawdown Screener**
+4. Click **Run Screener** in the Drawdown Screener tab
+
+#### Cost
+
+| Item | Cost |
+|---|---|
+| Finnhub (earnings + analyst data) | Free tier, no cost |
+| DeepSeek-chat (Gate 5 LLM, ~20 stocks) | ~$0.02 per scan |
+| yfinance (price + fundamentals) | Free |
+
+---
+
 ## AI Research
 
 Click **AI Research** on any stock (in the Scanner tab) to generate a structured report covering:
@@ -205,11 +277,14 @@ Open via **File → Settings** in the menu bar.
 | **Scanner** | Deep scan enabled / interval | Turn on hourly deep scans |
 | **Scanner** | Complete scan enabled / times | Turn on scheduled complete scans; set run times in ET (e.g. `09:00,13:00,16:15`) |
 | **Scanner** | Alert threshold | Minimum score to trigger a scan alert notification |
-| **AI** | Provider | `ollama`, `claude`, or `openrouter` |
+| **AI** | Provider | `ollama`, `claude`, or `openrouter` — used by AI Research and Smart Scanner ranking |
 | **AI** | Ollama URL / model | Local Ollama endpoint and model name |
 | **AI** | Claude API key / model | Anthropic API credentials |
 | **AI** | OpenRouter key / model | OpenRouter credentials |
 | **Congressional** | Tracked politicians | Comma-separated list of politician names whose trades are factored into scan scores |
+| **Drawdown Screener** | DeepSeek API key | API key for Gate 5 LLM cause classification (platform.deepseek.com) |
+| **Drawdown Screener** | DeepSeek model | Model name (default: `deepseek-chat`) |
+| **Drawdown Screener** | Finnhub API key | Free key for earnings surprise + analyst rating data (finnhub.io) |
 
 ---
 
@@ -237,7 +312,8 @@ When politicians listed under **Settings → Congressional → Tracked politicia
 ## Architecture Notes (for developers)
 
 - All background work runs in `QThread` subclasses; UI updates go through Qt signals/slots
-- Scan scoring formula: `total_score = value×0.4 + growth×0.3 + technical×0.3` (each sub-score 0–100)
+- Smart Scanner scoring formula: `total_score = value×0.4 + growth×0.3 + technical×0.3` (each sub-score 0–100)
+- Drawdown Screener is a fully isolated module — removing it requires deleting 4 files and 3 lines from `main_window.py`
 - AI Research results are cached 6 hours in `data/ai_research_cache.json`
 - Telegram bot uses long-polling (`getUpdates`) — no webhook required
 - See `CLAUDE.md` for full architecture reference
