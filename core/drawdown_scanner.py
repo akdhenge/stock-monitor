@@ -67,12 +67,31 @@ _BELL_WIDTH = 0.12
 # DeepSeek API
 _DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
+
+def _get_commodity_exposure(industry: str) -> str:
+    """Classify commodity exposure from yfinance industry label (substring match, case-insensitive)."""
+    s = (industry or "").lower()
+    if any(k in s for k in (
+        "oil & gas e&p", "oil & gas exploration", "oil & gas equipment",
+        "oil & gas integrated", "coal", "gold", "silver", "copper",
+        "steel", "aluminum", "metals & mining",
+    )):
+        return "HIGH"
+    if any(k in s for k in (
+        "independent power", "oil & gas midstream", "oil & gas refining",
+        "commodity chemicals", "fertilizers",
+    )):
+        return "MEDIUM"
+    return "LOW"
+
+
 # LLM classification prompt
 _CLASSIFY_PROMPT = """You are a financial analyst. A stock has dropped significantly from its recent high.
-Analyze the news headlines below and classify the PRIMARY cause of the price drop.
+Classify the PRIMARY cause of the price drop AND assess commodity exposure.
 
 Stock: {symbol}
 Current drawdown from 52-week high: {drawdown_pct:.1f}%
+Sector pre-assessment from industry label (may be imprecise): commodity_hint={sector_hint}
 
 Recent news headlines (last 60 days):
 {headlines}
@@ -82,13 +101,20 @@ Respond ONLY with a JSON object in this exact format (no markdown, no explanatio
   "cause_label": "<one of: capex_concern | margin_pressure | sector_rotation | one_time_legal | macro_panic | guidance_cut | demand_decline | share_loss | product_failure | accounting | exec_departure | existential_regulatory | secular_decline | unclear>",
   "cause_summary": "<2-3 sentences explaining the specific cause of the drop>",
   "confidence": "<high | medium | low>",
-  "pass": <true if cause is non-fundamental/sentiment-driven, false if it indicates real business damage>
+  "pass": <true if cause is non-fundamental/sentiment-driven, false if it indicates real business damage>,
+  "commodity_exposure": "<HIGH | MEDIUM | LOW>",
+  "commodity_rationale": "<one sentence: is revenue primarily driven by a commodity price the company doesn't control?>"
 }}
 
-Guidelines:
+Cause guidelines:
 - pass=true for: capex_concern, margin_pressure, sector_rotation, one_time_legal, macro_panic, guidance_cut, unclear
 - pass=false for: demand_decline, share_loss, product_failure, accounting, exec_departure, existential_regulatory, secular_decline
 - If unclear from headlines, use cause_label="unclear" with pass=true and confidence="low"
+
+Commodity exposure guidelines:
+- HIGH: revenue is primarily driven by a commodity price the company doesn't control (E&P, miners, coal, steel). Excluded from this screener even if cause label is sentiment-driven.
+- MEDIUM: meaningful commodity exposure with real non-commodity growth angles (e.g., power retailer with data-center demand). Keep but surface as a warning.
+- LOW: not materially commodity-dependent. Default for most companies.
 """
 
 
@@ -213,13 +239,19 @@ class DrawdownScanner(QThread):
 
         # ── Gate 5: LLM cause classification ─────────────────────────────────
         self.scan_status.emit(f"Gate 5: LLM cause classification ({len(g1_survivors)} symbols)...")
-        g5_survivors, g5_data = self._gate5_llm(g1_survivors, g1_data, g2_data)
+        g5_survivors, g5_data = self._gate5_llm(g1_survivors, g1_data, g2_data, g3_data)
         g5_misses = set(g1_survivors) - set(g5_survivors)
         for sym in g5_misses:
             d = {**g2_data.get(sym, {}), **g3_data.get(sym, {}),
                  **g4_data.get(sym, {}), **g1_data.get(sym, {}),
                  **g5_data.get(sym, {})}
-            close_misses.append(self._build_partial(sym, d, g5_data.get(sym, {}), "gate5_cause_of_drop"))
+            sym_g5 = g5_data.get(sym, {})
+            failed = (
+                "commodity_driven_high"
+                if sym_g5.get("commodity_exposure") == "HIGH"
+                else "gate5_cause_of_drop"
+            )
+            close_misses.append(self._build_partial(sym, d, sym_g5, failed))
         self.scan_status.emit(f"Gate 5: {len(g5_survivors)} passed cause classification")
         self.scan_progress.emit(88)
 
@@ -375,14 +407,27 @@ class DrawdownScanner(QThread):
                         # use EPS beat as proxy
                         earnings_beat = eps_beat
 
-                # next_earnings_date formatting
+                # next_earnings_date — earningsDate may be a past date or a list
                 ned = None
                 if next_earnings:
+                    ts = None
                     if isinstance(next_earnings, (int, float)):
-                        ned = datetime.fromtimestamp(next_earnings).strftime("%Y-%m-%d")
+                        ts = float(next_earnings)
+                    elif isinstance(next_earnings, list) and next_earnings:
+                        ts = float(next_earnings[0])
                     elif isinstance(next_earnings, str):
                         ned = next_earnings[:10]
+                    if ts is not None:
+                        ned = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                # Drop stale past dates — yfinance sometimes returns the previous quarter
+                if ned:
+                    try:
+                        if datetime.strptime(ned, "%Y-%m-%d").date() < date.today():
+                            ned = None
+                    except ValueError:
+                        ned = None
 
+                industry = info.get("industry", "")
                 return {
                     "market_cap_b": market_cap / 1e9,
                     "revenue_growth_yoy": float(rev_growth),
@@ -390,6 +435,8 @@ class DrawdownScanner(QThread):
                     "earnings_beat": earnings_beat,
                     "next_earnings_date": ned,
                     "sector": info.get("sector", ""),
+                    "industry": industry,
+                    "sector_commodity_exposure": _get_commodity_exposure(industry),
                 }
             except Exception:
                 return None
@@ -557,6 +604,7 @@ class DrawdownScanner(QThread):
         symbols: List[str],
         g1_data: Dict[str, Dict],
         g2_data: Optional[Dict[str, Dict]] = None,
+        g3_data: Optional[Dict[str, Dict]] = None,
     ) -> Tuple[List[str], Dict[str, Dict]]:
         survivors: List[str] = []
         data: Dict[str, Dict] = {}
@@ -582,11 +630,18 @@ class DrawdownScanner(QThread):
 
             headlines = self._fetch_news_headlines(sym)
             pct_below = (g2_data or {}).get(sym, {}).get("pct_below_high", 0.0)
+            sector_hint = (g3_data or {}).get(sym, {}).get("sector_commodity_exposure", "LOW")
 
-            classification = self._call_deepseek_classify(sym, pct_below, headlines, api_key)
+            classification = self._call_deepseek_classify(sym, pct_below, headlines, api_key, sector_hint)
             data[sym] = classification
 
-            if classification.get("llm_pass", True):
+            commodity = classification.get("commodity_exposure", "LOW")
+            llm_pass = classification.get("llm_pass", True)
+
+            if commodity == "HIGH":
+                # LLM confirmed commodity-driven — exclude even if cause label is sentiment
+                _log.info("%s: excluded — LLM commodity_exposure=HIGH", sym)
+            elif llm_pass:
                 survivors.append(sym)
 
             # Small delay to avoid hitting rate limits
@@ -637,6 +692,7 @@ class DrawdownScanner(QThread):
         pct_below: float,
         headlines: str,
         api_key: str,
+        sector_hint: str = "LOW",
     ) -> Dict:
         """Call DeepSeek API to classify the cause of the drawdown."""
         model = self._settings.get("deepseek_model", "deepseek-chat")
@@ -644,6 +700,7 @@ class DrawdownScanner(QThread):
             symbol=symbol,
             drawdown_pct=pct_below * 100,
             headlines=headlines,
+            sector_hint=sector_hint,
         )
 
         payload = json.dumps({
@@ -706,6 +763,8 @@ class DrawdownScanner(QThread):
                 "cause_summary": parsed.get("cause_summary", ""),
                 "cause_confidence": parsed.get("confidence", "low"),
                 "llm_pass": bool(parsed.get("pass", label in ACCEPTABLE_CAUSES)),
+                "commodity_exposure": parsed.get("commodity_exposure", "LOW"),
+                "commodity_rationale": parsed.get("commodity_rationale", ""),
             }
         except (json.JSONDecodeError, ValueError, KeyError):
             _log.warning("Could not parse DeepSeek response: %s", content[:200])
@@ -714,6 +773,8 @@ class DrawdownScanner(QThread):
                 "cause_summary": content[:300] if content else "Parse error",
                 "cause_confidence": "low",
                 "llm_pass": True,
+                "commodity_exposure": "LOW",
+                "commodity_rationale": "",
             }
 
     # ── Scoring ───────────────────────────────────────────────────────────────
@@ -730,6 +791,14 @@ class DrawdownScanner(QThread):
         s_opts = options_score
 
         composite = s_analyst * 0.40 + s_fund * 0.25 + s_draw * 0.20 + s_opts * 0.15
+
+        # Commodity exposure: LLM result takes precedence; fall back to sector hint when Gate 5 skipped
+        commodity_exp = d.get("commodity_exposure") or d.get("sector_commodity_exposure", "LOW")
+        commodity_rat = d.get("commodity_rationale", "")
+
+        # Apply 15% score penalty for MEDIUM commodity exposure
+        if commodity_exp == "MEDIUM":
+            composite *= 0.85
 
         return DrawdownResult(
             symbol=symbol,
@@ -755,6 +824,8 @@ class DrawdownScanner(QThread):
             market_cap_b=d.get("market_cap_b", 0.0),
             operating_cashflow=d.get("operating_cashflow", 0.0),
             options_verified=bool(d.get("options_verified", False)),
+            commodity_exposure=commodity_exp,
+            commodity_rationale=commodity_rat,
         )
 
     def _build_partial(
@@ -765,6 +836,8 @@ class DrawdownScanner(QThread):
         failed_gate: str,
     ) -> DrawdownResult:
         """Build a DrawdownResult for a close-miss candidate."""
+        commodity_exp = llm_d.get("commodity_exposure") or d.get("sector_commodity_exposure")
+        commodity_rat = llm_d.get("commodity_rationale", "")
         return DrawdownResult(
             symbol=symbol,
             score=0.0,
@@ -785,6 +858,8 @@ class DrawdownScanner(QThread):
             market_cap_b=d.get("market_cap_b", 0.0),
             operating_cashflow=d.get("operating_cashflow", 0.0),
             options_verified=bool(d.get("options_verified", False)),
+            commodity_exposure=commodity_exp,
+            commodity_rationale=commodity_rat,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────

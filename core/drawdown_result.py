@@ -28,6 +28,8 @@ class DrawdownResult:
     market_cap_b: float = 0.0       # market cap in billions
     operating_cashflow: float = 0.0
     options_verified: bool = False
+    commodity_exposure: Optional[str] = None  # "HIGH" | "MEDIUM" | "LOW" | None
+    commodity_rationale: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
 
 

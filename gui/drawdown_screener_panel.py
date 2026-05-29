@@ -17,12 +17,12 @@ from core.drawdown_result import DrawdownResult
 # Candidate table columns
 _COLS = [
     "#", "Symbol", "Score", "% Below High", "Analyst Upside",
-    "Buy%", "Rev Growth", "Earnings Beat", "Next Earnings", "Cause", "Confidence",
+    "Buy%", "Rev Growth", "Earnings Beat", "Next Earnings", "Cause", "Confidence", "Commodity",
 ]
 _COL_TOOLTIPS = {
     "#":             "Composite rank (1 = highest score)",
     "Symbol":        "Stock ticker symbol",
-    "Score":         "Composite score 0–100. Weighted: Analyst Upside 40%, Fundamentals 25%, Drawdown 20%, Options 15%.",
+    "Score":         "Composite score 0–100. Weighted: Analyst Upside 40%, Fundamentals 25%, Drawdown 20%, Options 15%. MEDIUM commodity exposure applies a 15% score penalty.",
     "% Below High":  "How far the stock is below its 52-week high. Screen targets 20–50% range.",
     "Analyst Upside":"Consensus analyst target vs current price. Screen requires ≥25% upside.",
     "Buy%":          "% of covering analysts rating Buy or Strong Buy. Screen requires ≥70%.",
@@ -31,6 +31,7 @@ _COL_TOOLTIPS = {
     "Next Earnings": "Next scheduled earnings date. Key for expiration selection.",
     "Cause":         "LLM-classified primary cause of the drop. Sentiment causes pass; fundamental damage fails.",
     "Confidence":    "LLM confidence in the cause classification (high/medium/low).",
+    "Commodity":     "Commodity exposure assessed by LLM. HIGH = rejected (price driven by commodity it doesn't control). MEDIUM = flagged with 15% score penalty. LOW = clean.",
 }
 
 # Miss table: same columns plus "Failed Gate"
@@ -282,6 +283,14 @@ class DrawdownScreenerPanel(QWidget):
 
             bg = self._row_color(r)
 
+            comm = r.commodity_exposure or ""
+            if comm == "MEDIUM":
+                comm_str = "⚠ Med"
+            elif comm == "HIGH":
+                comm_str = "❌ High"
+            else:
+                comm_str = "—"
+
             items = [
                 _num_item(float(rank), ".0f"),
                 _text_item(r.symbol),
@@ -294,6 +303,7 @@ class DrawdownScreenerPanel(QWidget):
                 _text_item(r.next_earnings_date or "—"),
                 _text_item(r.cause_label.replace("_", " ")),
                 _text_item(r.cause_confidence),
+                _text_item(comm_str),
             ]
 
             if include_failed_gate:
@@ -329,6 +339,26 @@ class DrawdownScreenerPanel(QWidget):
     def _show_detail(self, r: DrawdownResult) -> None:
         cause_bg = _CAUSE_COLORS.get(r.cause_label, QColor("white"))
         cause_hex = cause_bg.name()
+
+        comm = r.commodity_exposure or ""
+        if comm == "MEDIUM":
+            commodity_section = (
+                '<h3>Commodity Exposure</h3>'
+                '<div style="background:#fff3cd; padding:8px; border-radius:4px;">'
+                '<b>⚠ MEDIUM — commodity adjacent</b><br>'
+                f'{r.commodity_rationale or "Assessed by LLM — meaningful commodity exposure with non-commodity growth angles."}'
+                '</div>'
+            )
+        elif comm == "HIGH":
+            commodity_section = (
+                '<h3>Commodity Exposure</h3>'
+                '<div style="background:#ffcdd2; padding:8px; border-radius:4px;">'
+                '<b>❌ HIGH — commodity-driven</b><br>'
+                f'{r.commodity_rationale or "Excluded: price primarily driven by a commodity the company doesn\'t control."}'
+                '</div>'
+            )
+        else:
+            commodity_section = ""
 
         html = f"""
 <h2>{r.symbol}</h2>
@@ -390,6 +420,8 @@ class DrawdownScreenerPanel(QWidget):
   <b>Confidence:</b> {r.cause_confidence}<br><br>
   {r.cause_summary or "<i>No summary available.</i>"}
 </div>
+
+{commodity_section}
 
 <p style="color:#888; font-size:10px;">
   Screened {r.timestamp.strftime("%Y-%m-%d %H:%M")} &nbsp;|&nbsp;
