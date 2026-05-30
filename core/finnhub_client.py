@@ -6,7 +6,8 @@ import json
 import logging
 import urllib.parse
 import urllib.request
-from typing import Optional
+from datetime import date, timedelta
+from typing import List, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -49,6 +50,16 @@ class FinnhubClient:
         if not data or not isinstance(data, list) or len(data) == 0:
             return None
         return data[0]
+
+    def get_upgrade_downgrade(self, symbol: str, days: int = 90) -> List[dict]:
+        """Return analyst rating change events in last `days` days.
+        Each item has keys: action, fromGrade, toGrade, gradeDate, company.
+        action='downgrade' for rating cuts."""
+        from_date = (date.today() - timedelta(days=days)).isoformat()
+        to_date = date.today().isoformat()
+        data = self._get("/stock/upgrade-downgrade",
+                         {"symbol": symbol, "from": from_date, "to": to_date})
+        return data if isinstance(data, list) else []
 
     def get_basic_financials(self, symbol: str) -> Optional[dict]:
         """Return basic financial metrics including revenue growth."""

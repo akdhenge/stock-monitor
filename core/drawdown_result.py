@@ -30,6 +30,10 @@ class DrawdownResult:
     options_verified: bool = False
     commodity_exposure: Optional[str] = None  # "HIGH" | "MEDIUM" | "LOW" | None
     commodity_rationale: str = ""
+    multi_causal_flag: bool = False            # True if >1 primary cause identified (NFLX pattern)
+    cause_labels_all: list = field(default_factory=list)  # all causes identified by LLM
+    avg_volume_30d: float = 0.0               # 30-day avg daily volume
+    downgrade_count_90d: int = 0              # analyst rating downgrades in last 90 days
     timestamp: datetime = field(default_factory=datetime.now)
 
 

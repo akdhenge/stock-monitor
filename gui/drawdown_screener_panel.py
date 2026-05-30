@@ -340,6 +340,20 @@ class DrawdownScreenerPanel(QWidget):
         cause_bg = _CAUSE_COLORS.get(r.cause_label, QColor("white"))
         cause_hex = cause_bg.name()
 
+        # Gate 5b — multi-causal warning block
+        if r.multi_causal_flag and r.cause_labels_all:
+            labels_str = ", ".join(c.replace("_", " ") for c in r.cause_labels_all)
+            multi_causal_section = (
+                '<div style="background:#fff3cd; padding:8px; border-radius:4px; margin-bottom:8px;">'
+                '<b>&#9888; Multi-causal drop</b> — Multiple overlapping causes identified: '
+                f'<i>{labels_str}</i>.<br>'
+                'Thesis is muddier than a single-cause setup (NFLX archetype). '
+                'Verify that the primary cause is clearly dominant before committing.'
+                '</div>'
+            )
+        else:
+            multi_causal_section = ""
+
         comm = r.commodity_exposure or ""
         if comm == "MEDIUM":
             commodity_section = (
@@ -360,7 +374,11 @@ class DrawdownScreenerPanel(QWidget):
         else:
             commodity_section = ""
 
+        vol_str = f"{r.avg_volume_30d/1e6:.1f}M" if r.avg_volume_30d else "—"
+        dng_str = str(r.downgrade_count_90d) if r.downgrade_count_90d else "0"
+
         html = f"""
+{multi_causal_section}
 <h2>{r.symbol}</h2>
 <table width="100%" cellspacing="4">
 <tr>
@@ -375,6 +393,9 @@ class DrawdownScreenerPanel(QWidget):
   <td><b>Days Since High:</b></td><td>{r.days_since_high}</td>
   <td><b>Options Verified:</b></td><td>{"Yes" if r.options_verified else "Unverified"}</td>
 </tr>
+<tr>
+  <td><b>30d Avg Volume:</b></td><td>{vol_str}</td>
+</tr>
 </table>
 
 <h3>Analyst Conviction</h3>
@@ -386,6 +407,10 @@ class DrawdownScreenerPanel(QWidget):
 <tr>
   <td><b>Analyst Count:</b></td><td>{r.analyst_count}</td>
   <td><b>Next Earnings:</b></td><td>{r.next_earnings_date or "Unknown"}</td>
+</tr>
+<tr>
+  <td><b>Downgrades (90d):</b></td>
+  <td>{"<span style='color:red;'>" + dng_str + " ⚠</span>" if r.downgrade_count_90d >= 2 else dng_str}</td>
 </tr>
 </table>
 
@@ -417,7 +442,9 @@ class DrawdownScreenerPanel(QWidget):
 <div style="background:{cause_hex}; padding:8px; border-radius:4px;">
   <b>Classification:</b> {r.cause_label.replace("_", " ").title()}
   &nbsp;&nbsp;|&nbsp;&nbsp;
-  <b>Confidence:</b> {r.cause_confidence}<br><br>
+  <b>Confidence:</b> {r.cause_confidence}
+  {"&nbsp;&nbsp;|&nbsp;&nbsp;<b>All causes:</b> " + ", ".join(c.replace("_", " ") for c in r.cause_labels_all) if len(r.cause_labels_all) > 1 else ""}
+  <br><br>
   {r.cause_summary or "<i>No summary available.</i>"}
 </div>
 

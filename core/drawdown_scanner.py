@@ -59,6 +59,7 @@ _G3_MIN_MARKET_CAP = 10e9   # $10B
 _G4_MIN_ANALYST_UPSIDE = 0.25   # 25% upside to consensus target
 _G4_MIN_ANALYSTS = 10
 _G4_MIN_BUY_PCT = 0.70          # 70% Buy/Strong Buy
+_G4_MAX_DOWNGRADES = 2          # max analyst rating downgrades in trailing 90 days
 
 # Scoring bell curve: peaks at ~27% drawdown, width ~12%
 _BELL_PEAK = 0.27
@@ -98,10 +99,12 @@ Recent news headlines (last 60 days):
 
 Respond ONLY with a JSON object in this exact format (no markdown, no explanation):
 {{
-  "cause_label": "<one of: capex_concern | margin_pressure | sector_rotation | one_time_legal | macro_panic | guidance_cut | demand_decline | share_loss | product_failure | accounting | exec_departure | existential_regulatory | secular_decline | unclear>",
-  "cause_summary": "<2-3 sentences explaining the specific cause of the drop>",
+  "cause_label": "<PRIMARY cause — one of: capex_concern | margin_pressure | sector_rotation | one_time_legal | macro_panic | guidance_cut | demand_decline | share_loss | product_failure | accounting | exec_departure | existential_regulatory | secular_decline | unclear>",
+  "cause_labels_all": ["<primary_cause>", "<secondary_cause_if_any>"],
+  "multi_causal": <true if multiple overlapping PRIMARY causes exist; false if single clean cause>,
+  "cause_summary": "<2-3 sentences explaining the specific cause(s) of the drop>",
   "confidence": "<high | medium | low>",
-  "pass": <true if cause is non-fundamental/sentiment-driven, false if it indicates real business damage>,
+  "pass": <true if ALL primary causes are non-fundamental/sentiment-driven, false if even one is real business damage>,
   "commodity_exposure": "<HIGH | MEDIUM | LOW>",
   "commodity_rationale": "<one sentence: is revenue primarily driven by a commodity price the company doesn't control?>"
 }}
@@ -109,7 +112,11 @@ Respond ONLY with a JSON object in this exact format (no markdown, no explanatio
 Cause guidelines:
 - pass=true for: capex_concern, margin_pressure, sector_rotation, one_time_legal, macro_panic, guidance_cut, unclear
 - pass=false for: demand_decline, share_loss, product_failure, accounting, exec_departure, existential_regulatory, secular_decline
+- If even ONE primary cause is unacceptable, set pass=false
 - If unclear from headlines, use cause_label="unclear" with pass=true and confidence="low"
+- Multi-causal check: if the drop has multiple overlapping primary causes (not just one primary + minor noise),
+  set multi_causal=true and list all primary causes in cause_labels_all. A headline EPS miss + legal cloud + governance
+  concern = multi_causal=true. A capex concern + mild sector rotation = multi_causal=false (single dominant cause).
 
 Commodity exposure guidelines:
 - HIGH: revenue is primarily driven by a commodity price the company doesn't control (E&P, miners, coal, steel). Excluded from this screener even if cause label is sentiment-driven.
@@ -183,7 +190,7 @@ class DrawdownScanner(QThread):
         self.scan_status.emit(f"Gate 2: Checking drawdowns ({len(symbols)} symbols)...")
         self.scan_progress.emit(5)
         g2_survivors, g2_data = self._gate2_drawdown(symbols)
-        self.scan_status.emit(f"Gate 2: {len(g2_survivors)} passed (20-50% below 52w high within 180 days)")
+        self.scan_status.emit(f"Gate 2: {len(g2_survivors)} passed (20-50% below 52w high within 180 days, volume >2M)")
         self.scan_progress.emit(20)
 
         if not self._running or not g2_survivors:
@@ -211,7 +218,8 @@ class DrawdownScanner(QThread):
         self.scan_status.emit(f"Gate 4: Checking analyst conviction ({len(g3_survivors)} symbols)...")
         g4_survivors, g4_data = self._gate4_analyst(g3_survivors, g3_data, finnhub)
         # Each Gate 3 survivor gets 1 Finnhub recommendations call
-        self._cost["finnhub_calls"] += len(g3_survivors) if finnhub else 0
+        # 2 Finnhub calls per Gate 4 symbol: recommendations + upgrade-downgrade
+        self._cost["finnhub_calls"] += (len(g3_survivors) * 2) if finnhub else 0
         g4_misses = set(g3_survivors) - set(g4_survivors)
         for sym in g4_misses:
             d = {**g2_data.get(sym, {}), **g3_data.get(sym, {})}
@@ -355,6 +363,13 @@ class DrawdownScanner(QThread):
                 peak_date = peak_idx.date() if hasattr(peak_idx, "date") else today
                 days_since = (today - peak_date).days
 
+                # Volume check: 30-day avg daily volume > 2M (Gate 1 spec, free from batch data)
+                avg_volume_30d = 0.0
+                if "Volume" in df.columns:
+                    avg_volume_30d = float(df["Volume"].tail(30).mean())
+                if avg_volume_30d < 2_000_000:
+                    continue
+
                 if (
                     _G2_MIN_DRAWDOWN <= pct_below <= _G2_MAX_DRAWDOWN
                     and days_since <= _G2_MAX_DAYS_SINCE_HIGH
@@ -365,6 +380,7 @@ class DrawdownScanner(QThread):
                         "pct_below_high": pct_below,
                         "days_since_high": days_since,
                         "peak_price": peak_price,
+                        "avg_volume_30d": avg_volume_30d,
                     }
             except Exception:
                 continue
@@ -502,11 +518,23 @@ class DrawdownScanner(QThread):
                 if buy_pct < _G4_MIN_BUY_PCT:
                     return None
 
+                # Downgrade count: reject if > 2 rating downgrades in trailing 90 days
+                downgrade_count = 0
+                if finnhub:
+                    events = finnhub.get_upgrade_downgrade(sym, days=90)
+                    downgrade_count = sum(
+                        1 for e in events
+                        if (e.get("action") or "").lower() == "downgrade"
+                    )
+                    if downgrade_count > _G4_MAX_DOWNGRADES:
+                        return None
+
                 return {
                     "analyst_upside_pct": upside,
                     "buy_rating_pct": buy_pct,
                     "analyst_count": int(num_analysts),
                     "analyst_target": float(target),
+                    "downgrade_count_90d": downgrade_count,
                 }
             except Exception:
                 return None
@@ -758,8 +786,13 @@ class DrawdownScanner(QThread):
                     clean = clean[4:]
             parsed = json.loads(clean.strip())
             label = parsed.get("cause_label", "unclear")
+            all_labels = parsed.get("cause_labels_all", [label])
+            if not isinstance(all_labels, list):
+                all_labels = [label]
             return {
                 "cause_label": label,
+                "cause_labels_all": all_labels,
+                "multi_causal": bool(parsed.get("multi_causal", False)),
                 "cause_summary": parsed.get("cause_summary", ""),
                 "cause_confidence": parsed.get("confidence", "low"),
                 "llm_pass": bool(parsed.get("pass", label in ACCEPTABLE_CAUSES)),
@@ -770,6 +803,8 @@ class DrawdownScanner(QThread):
             _log.warning("Could not parse DeepSeek response: %s", content[:200])
             return {
                 "cause_label": "unclear",
+                "cause_labels_all": ["unclear"],
+                "multi_causal": False,
                 "cause_summary": content[:300] if content else "Parse error",
                 "cause_confidence": "low",
                 "llm_pass": True,
@@ -826,6 +861,10 @@ class DrawdownScanner(QThread):
             options_verified=bool(d.get("options_verified", False)),
             commodity_exposure=commodity_exp,
             commodity_rationale=commodity_rat,
+            multi_causal_flag=bool(d.get("multi_causal", False)),
+            cause_labels_all=d.get("cause_labels_all", []),
+            avg_volume_30d=d.get("avg_volume_30d", 0.0),
+            downgrade_count_90d=int(d.get("downgrade_count_90d", 0)),
         )
 
     def _build_partial(
@@ -860,6 +899,10 @@ class DrawdownScanner(QThread):
             options_verified=bool(d.get("options_verified", False)),
             commodity_exposure=commodity_exp,
             commodity_rationale=commodity_rat,
+            multi_causal_flag=bool(llm_d.get("multi_causal", False)),
+            cause_labels_all=llm_d.get("cause_labels_all", []),
+            avg_volume_30d=d.get("avg_volume_30d", 0.0),
+            downgrade_count_90d=int(d.get("downgrade_count_90d", 0)),
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
