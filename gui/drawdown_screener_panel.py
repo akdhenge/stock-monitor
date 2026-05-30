@@ -7,9 +7,9 @@ from typing import List, Optional
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout,
-    QWidget,
+    QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
+    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
 from core.drawdown_result import DrawdownResult
@@ -138,6 +138,9 @@ class DrawdownScreenerPanel(QWidget):
         )
         self._btn_cancel = QPushButton("Cancel")
         self._btn_cancel.setEnabled(False)
+        self._btn_export = QPushButton("Export CSV")
+        self._btn_export.setEnabled(False)
+        self._btn_export.setToolTip("Export all candidates and near-misses to a CSV file")
         self._lbl_status = QLabel("Idle — click Run Screener to start")
         self._lbl_status.setStyleSheet("color: gray;")
         self._progress = QProgressBar()
@@ -147,6 +150,7 @@ class DrawdownScreenerPanel(QWidget):
 
         ctrl.addWidget(self._btn_run)
         ctrl.addWidget(self._btn_cancel)
+        ctrl.addWidget(self._btn_export)
         ctrl.addSpacing(12)
         ctrl.addWidget(self._lbl_status, stretch=1)
         ctrl.addWidget(self._progress)
@@ -221,6 +225,7 @@ class DrawdownScreenerPanel(QWidget):
         # Wire buttons
         self._btn_run.clicked.connect(self.request_scan)
         self._btn_cancel.clicked.connect(self.request_cancel)
+        self._btn_export.clicked.connect(self._export_csv)
         self._table.currentItemChanged.connect(self._on_selection_changed)
 
     # ── Public slots ──────────────────────────────────────────────────────────
@@ -250,6 +255,7 @@ class DrawdownScreenerPanel(QWidget):
     def set_scan_running(self) -> None:
         self._btn_run.setEnabled(False)
         self._btn_cancel.setEnabled(True)
+        self._btn_export.setEnabled(False)
         self._progress.setValue(0)
         self._lbl_status.setStyleSheet("color: #333;")
 
@@ -264,6 +270,7 @@ class DrawdownScreenerPanel(QWidget):
 
         self._populate_table(self._table, candidates, include_failed_gate=False)
         self._populate_table(self._miss_table, misses, include_failed_gate=True)
+        self._btn_export.setEnabled(bool(results))
         self.set_scan_idle()
 
     # ── Table population ──────────────────────────────────────────────────────
@@ -325,6 +332,64 @@ class DrawdownScreenerPanel(QWidget):
         if r.score >= 50:
             return _YELLOW
         return _ORANGE
+
+    # ── CSV Export ────────────────────────────────────────────────────────────
+
+    def _export_csv(self) -> None:
+        import csv
+        if not self._results:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Drawdown Screener Results", "drawdown_results.csv",
+            "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+        headers = [
+            "Type", "Symbol", "Score", "Price", "% Below High", "Days Since High",
+            "Analyst Upside %", "Buy %", "Analyst Count", "Downgrades (90d)",
+            "Rev Growth %", "Earnings Beat", "Market Cap ($B)", "Op Cash Flow ($B)",
+            "30d Avg Volume (M)", "Next Earnings", "Options Verified",
+            "Cause", "Cause Summary", "Confidence", "Multi-Causal", "All Causes",
+            "Commodity", "Commodity Rationale", "Failed Gate", "Scan Timestamp",
+        ]
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(headers)
+                for r in self._results:
+                    w.writerow([
+                        "Near-miss" if r.failed_gate else "Candidate",
+                        r.symbol,
+                        f"{r.score:.1f}",
+                        f"{r.current_price:.2f}",
+                        f"{r.pct_below_high * 100:.1f}",
+                        r.days_since_high,
+                        f"{r.analyst_upside_pct * 100:.1f}",
+                        f"{r.buy_rating_pct * 100:.1f}",
+                        r.analyst_count,
+                        r.downgrade_count_90d,
+                        f"{r.revenue_growth_yoy * 100:.1f}",
+                        "Yes" if r.earnings_beat else "No",
+                        f"{r.market_cap_b:.1f}",
+                        f"{r.operating_cashflow / 1e9:.2f}",
+                        f"{r.avg_volume_30d / 1e6:.1f}",
+                        r.next_earnings_date or "",
+                        "Yes" if r.options_verified else "No",
+                        r.cause_label,
+                        r.cause_summary,
+                        r.cause_confidence,
+                        "Yes" if r.multi_causal_flag else "No",
+                        "; ".join(r.cause_labels_all),
+                        r.commodity_exposure or "",
+                        r.commodity_rationale,
+                        r.failed_gate or "",
+                        r.timestamp.strftime("%Y-%m-%d %H:%M"),
+                    ])
+        except Exception as exc:
+            self._lbl_status.setText(f"Export failed: {exc}")
+            return
+        self._lbl_status.setText(f"Exported to {path}")
 
     # ── Detail pane ───────────────────────────────────────────────────────────
 

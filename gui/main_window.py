@@ -237,6 +237,7 @@ class MainWindow(QMainWindow):
         self._drawdown_panel.request_scan.connect(self._trigger_drawdown_scan)
         self._drawdown_panel.request_cancel.connect(self._cancel_drawdown_scan)
         self._tabs.addTab(self._drawdown_panel, "Drawdown Screener")
+        self._load_drawdown_results()
 
         # Tab 4 — Logs
         self._log_panel = LogPanel()
@@ -410,7 +411,20 @@ class MainWindow(QMainWindow):
         self._scanner_panel.set_scan_idle("Cancelled")
         self._scan_status_label.setText("Scan cancelled.")
 
-    # ── Drawdown Screener ──────────────────────────────────────────────────────
+    # ── Drawdown Screener ─────────────────────────────────────────────────────
+
+    def _load_drawdown_results(self) -> None:
+        from core.drawdown_results_store import load_drawdown_results
+        saved = load_drawdown_results()
+        if not saved:
+            return
+        self._drawdown_panel.display_results(saved)
+        candidates = [r for r in saved if r.failed_gate is None]
+        ts = saved[0].timestamp
+        self._drawdown_panel.set_status(
+            f"Loaded {len(candidates)} candidates from last scan "
+            f"({ts.strftime('%Y-%m-%d %H:%M')})"
+        )
 
     def _trigger_drawdown_scan(self) -> None:
         if self._drawdown_scanner is not None and self._drawdown_scanner.isRunning():
@@ -440,6 +454,8 @@ class MainWindow(QMainWindow):
         self._drawdown_panel.set_status(
             f"Done: {len(candidates)} candidates, {len(results) - len(candidates)} near-misses"
         )
+        from core.drawdown_results_store import save_drawdown_results
+        save_drawdown_results(results)
 
     # ── Ticker Lookup ──────────────────────────────────────────────────────────
 
