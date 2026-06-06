@@ -1031,6 +1031,7 @@ class TraderAgent(QThread):
         vix_val/spy_hist are passed from _process_scan to avoid a duplicate yfinance fetch.
         """
         config = load_trader_config()
+        settings = self._get_settings()
         if not config.get("options_enabled", False):
             return
         if not config.get("enabled", False):
