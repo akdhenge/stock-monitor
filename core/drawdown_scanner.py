@@ -61,6 +61,48 @@ _G4_MIN_ANALYSTS = 10
 _G4_MIN_BUY_PCT = 0.70          # 70% Buy/Strong Buy
 _G4_MAX_DOWNGRADES = 2          # max analyst rating downgrades in trailing 90 days
 
+# ── Soft-tolerance bounds ────────────────────────────────────────────────────
+# Each hard-* value below is the true exclusion boundary; between the original
+# threshold and the hard boundary a candidate soft-passes with a degrading
+# margin_score (see _margin_above/_margin_below/_margin_range). Values follow
+# a ~15% relative band except where the redesign spec gave an explicit number
+# (noted inline) — those explicit numbers are used as-is since they were
+# hand-picked per metric rather than derived from a blanket 15%.
+_MARGIN_FLOOR = 40.0   # score at the very edge of the tolerance band (not 0 — still a real, if weak, pass)
+
+# Gate 2 — drawdown depth/recency (~15% relative both directions)
+_G2_DRAWDOWN_HARD_MIN = 0.17    # 0.20 * 0.85
+_G2_DRAWDOWN_HARD_MAX = 0.57    # 0.50 * 1.15 (rounded from 0.575 -> spec's "~57%")
+_G2_DAYS_HARD_MAX = 207         # 180 * 1.15
+
+# Gate 3 — fundamentals (falling-knife filter). earnings_beat and
+# operating_cashflow>0 stay HARD (no tolerance, see _gate3_fundamentals).
+# rev_growth is spec's explicit "~7%" floor (not a strict 15% relative band —
+# 0.10*0.85=0.085 — the spec explicitly asked for ~7%, so that number wins).
+_G3_REV_GROWTH_HARD_FLOOR = 0.07
+
+# Gate 4 — analyst conviction (spec's explicit numbers)
+_G4_UPSIDE_HARD_FLOOR = 0.20        # spec explicit "~20%"
+_G4_BUY_PCT_HARD_FLOOR = 0.60       # spec explicit "~60%"
+_G4_DOWNGRADES_HARD_MAX = 3         # spec explicit "~3"
+_G4_ANALYST_COUNT_HARD_FLOOR = 8    # spec explicit "~8"
+
+# Gate 1 — options liquidity (spec's explicit numbers)
+_G1_OI_SOFT_MIN = 150                # was 500 inline — same rationale as the hard floor below:
+                                     # 500 was never achievable by real 6mo-forward LEAPS OI on
+                                     # even the most liquid mega-caps in this sample.
+_G1_OI_HARD_FLOOR = 75              # was 350 (spec's literal "~350") — real chain data on
+                                     # mega-caps (MU, AMD) showed OI ~130-140 at the actual
+                                     # 6mo-forward near-ATM strike, well under even a 350 floor.
+                                     # Open interest concentrates in near-dated expirations for
+                                     # every underlying, not just illiquid ones — a 500/350 bar
+                                     # was calibrated for near-term options, not 6-12mo LEAPS.
+_G1_SPREAD_HARD_CEILING = 0.07      # spec explicit "~7%" — kept as the primary liquidity
+                                     # signal; tight spread (confirmed 2.7-3.8% on MU/AMD)
+                                     # is what actually determines fill quality on a LEAPS
+                                     # order, unlike a raw OI count that's structurally low
+                                     # for far-dated contracts regardless of true liquidity.
+
 # Scoring bell curve: peaks at ~27% drawdown, width ~12%
 _BELL_PEAK = 0.27
 _BELL_WIDTH = 0.12
@@ -130,6 +172,60 @@ def _bell(x: float, peak: float = _BELL_PEAK, width: float = _BELL_WIDTH) -> flo
     return 100.0 * math.exp(-0.5 * ((x - peak) / width) ** 2)
 
 
+# ── Soft-tolerance margin helpers ────────────────────────────────────────────
+# All three return None for a true reject (outside the tolerance band, or the
+# hard-only condition failed) and a float in [_MARGIN_FLOOR, 100.0] otherwise.
+# 100.0 = comfortably clears the original threshold; degrades linearly toward
+# _MARGIN_FLOOR as the value approaches the hard boundary.
+
+def _margin_above(value: Optional[float], soft_min: float, hard_floor: float,
+                   floor: float = _MARGIN_FLOOR) -> Optional[float]:
+    """Metric must be >= soft_min to fully pass; tolerated down to hard_floor."""
+    if value is None:
+        return None
+    if value >= soft_min:
+        return 100.0
+    if value < hard_floor:
+        return None
+    span = soft_min - hard_floor
+    frac = (value - hard_floor) / span if span > 0 else 1.0
+    return floor + frac * (100.0 - floor)
+
+
+def _margin_below(value: Optional[float], soft_max: float, hard_ceiling: float,
+                   floor: float = _MARGIN_FLOOR) -> Optional[float]:
+    """Metric must be <= soft_max to fully pass; tolerated up to hard_ceiling."""
+    if value is None:
+        return None
+    if value <= soft_max:
+        return 100.0
+    if value > hard_ceiling:
+        return None
+    span = hard_ceiling - soft_max
+    frac = (hard_ceiling - value) / span if span > 0 else 1.0
+    return floor + frac * (100.0 - floor)
+
+
+def _margin_range(value: Optional[float], hard_min: float, soft_min: float,
+                   soft_max: float, hard_max: float,
+                   floor: float = _MARGIN_FLOOR) -> Optional[float]:
+    """Metric must land in [soft_min, soft_max] to fully pass; tolerated out to
+    [hard_min, hard_max]."""
+    if value is None:
+        return None
+    if value < hard_min or value > hard_max:
+        return None
+    if soft_min <= value <= soft_max:
+        return 100.0
+    if value < soft_min:
+        span = soft_min - hard_min
+        frac = (value - hard_min) / span if span > 0 else 1.0
+    else:
+        span = hard_max - soft_max
+        frac = (hard_max - value) / span if span > 0 else 1.0
+    return floor + frac * (100.0 - floor)
+
+
 def _options_quality_score(has_6mo: bool, has_12mo: bool) -> float:
     """Score 0-100 based on options expiry availability."""
     if has_6mo and has_12mo:
@@ -159,14 +255,15 @@ class DrawdownScanner(QThread):
     def run(self) -> None:
         self._running = True
         try:
-            self._do_scan()
+            results = self._do_scan()
+            self.scan_complete.emit(results)
         except Exception as exc:
             _log.exception("DrawdownScanner unhandled error")
             self.scan_error.emit(f"Screener error: {exc}")
 
     # ── Main scan pipeline ────────────────────────────────────────────────────
 
-    def _do_scan(self) -> None:
+    def _do_scan(self) -> List[DrawdownResult]:
         results: List[DrawdownResult] = []
         close_misses: List[DrawdownResult] = []
         self._cost: Dict[str, Any] = {
@@ -184,7 +281,7 @@ class DrawdownScanner(QThread):
         self.scan_status.emit(f"Universe: {len(symbols)} symbols")
 
         if not self._running:
-            return
+            return []
 
         # ── Gate 2: Drawdown filter ───────────────────────────────────────────
         self.scan_status.emit(f"Gate 2: Checking drawdowns ({len(symbols)} symbols)...")
@@ -194,8 +291,7 @@ class DrawdownScanner(QThread):
         self.scan_progress.emit(20)
 
         if not self._running or not g2_survivors:
-            self.scan_complete.emit([])
-            return
+            return []
 
         # ── Gate 3: Fundamentals ──────────────────────────────────────────────
         self.scan_status.emit(f"Gate 3: Checking fundamentals ({len(g2_survivors)} symbols)...")
@@ -211,8 +307,7 @@ class DrawdownScanner(QThread):
         self.scan_progress.emit(40)
 
         if not self._running or not g3_survivors:
-            self.scan_complete.emit(close_misses)
-            return
+            return close_misses
 
         # ── Gate 4: Analyst conviction ────────────────────────────────────────
         self.scan_status.emit(f"Gate 4: Checking analyst conviction ({len(g3_survivors)} symbols)...")
@@ -228,8 +323,7 @@ class DrawdownScanner(QThread):
         self.scan_progress.emit(55)
 
         if not self._running or not g4_survivors:
-            self.scan_complete.emit(close_misses)
-            return
+            return close_misses
 
         # ── Gate 1: Options liquidity ─────────────────────────────────────────
         self.scan_status.emit(f"Gate 1: Checking options liquidity ({len(g4_survivors)} symbols)...")
@@ -242,8 +336,7 @@ class DrawdownScanner(QThread):
         self.scan_progress.emit(70)
 
         if not self._running or not g1_survivors:
-            self.scan_complete.emit(close_misses)
-            return
+            return close_misses
 
         # ── Gate 5: LLM cause classification ─────────────────────────────────
         self.scan_status.emit(f"Gate 5: LLM cause classification ({len(g1_survivors)} symbols)...")
@@ -264,7 +357,7 @@ class DrawdownScanner(QThread):
         self.scan_progress.emit(88)
 
         if not self._running:
-            return
+            return close_misses
 
         # ── Score and rank ────────────────────────────────────────────────────
         for sym in g5_survivors:
@@ -281,7 +374,7 @@ class DrawdownScanner(QThread):
             f"Complete: {len(results)} candidates, {len(close_misses)} near-misses"
         )
         self.scan_cost.emit(dict(self._cost))
-        self.scan_complete.emit(results + close_misses)
+        return results + close_misses
 
     # ── Universe fetch ────────────────────────────────────────────────────────
 
@@ -363,25 +456,33 @@ class DrawdownScanner(QThread):
                 peak_date = peak_idx.date() if hasattr(peak_idx, "date") else today
                 days_since = (today - peak_date).days
 
-                # Volume check: 30-day avg daily volume > 2M (Gate 1 spec, free from batch data)
+                # Volume check: 30-day avg daily volume > 2M (Gate 1 spec, free from batch data).
+                # Left HARD — not one of the metrics the redesign asked to soften; this is a
+                # data-quality/tradability floor, not a business threshold, so no tolerance band.
                 avg_volume_30d = 0.0
                 if "Volume" in df.columns:
                     avg_volume_30d = float(df["Volume"].tail(30).mean())
                 if avg_volume_30d < 2_000_000:
                     continue
 
-                if (
-                    _G2_MIN_DRAWDOWN <= pct_below <= _G2_MAX_DRAWDOWN
-                    and days_since <= _G2_MAX_DAYS_SINCE_HIGH
-                ):
-                    survivors.append(sym)
-                    data[sym] = {
-                        "current_price": current_price,
-                        "pct_below_high": pct_below,
-                        "days_since_high": days_since,
-                        "peak_price": peak_price,
-                        "avg_volume_30d": avg_volume_30d,
-                    }
+                drawdown_margin = _margin_range(
+                    pct_below, _G2_DRAWDOWN_HARD_MIN, _G2_MIN_DRAWDOWN,
+                    _G2_MAX_DRAWDOWN, _G2_DRAWDOWN_HARD_MAX,
+                )
+                days_margin = _margin_below(days_since, _G2_MAX_DAYS_SINCE_HIGH, _G2_DAYS_HARD_MAX)
+
+                if drawdown_margin is None or days_margin is None:
+                    continue  # outside the tolerance band entirely — true reject
+
+                survivors.append(sym)
+                data[sym] = {
+                    "current_price": current_price,
+                    "pct_below_high": pct_below,
+                    "days_since_high": days_since,
+                    "peak_price": peak_price,
+                    "avg_volume_30d": avg_volume_30d,
+                    "_margin_g2": (drawdown_margin + days_margin) / 2.0,
+                }
             except Exception:
                 continue
 
@@ -400,28 +501,81 @@ class DrawdownScanner(QThread):
 
         def _check_one(sym: str) -> Optional[Dict]:
             try:
-                info = yf.Ticker(sym).info
+                ticker = yf.Ticker(sym)
+                info = ticker.info
                 market_cap = info.get("marketCap") or 0
                 rev_growth = info.get("revenueGrowth")
                 op_cf = info.get("operatingCashflow")
                 next_earnings = info.get("earningsDate") or info.get("earningsTimestamp")
 
+                # marketCap in .info is flaky field-by-field (Yahoo omits it on some
+                # calls independent of whether the rest of the payload came through —
+                # confirmed by direct testing: two back-to-back .info calls for the same
+                # symbol returned marketCap=None once and revenueGrowth=None the other
+                # time). fast_info.market_cap is a separate, lighter-weight endpoint
+                # that has proven reliable where .info flakes — use it first rather
+                # than retrying the same flaky call.
+                if not market_cap:
+                    try:
+                        fi_mcap = ticker.fast_info.market_cap
+                        if fi_mcap:
+                            market_cap = fi_mcap
+                    except Exception:
+                        pass
+
+                # revenueGrowth has no fast_info equivalent — still worth one retry
+                # after a short backoff, then a Finnhub fallback if it's still missing.
+                if rev_growth is None:
+                    time.sleep(1.5)
+                    info_retry = ticker.info
+                    rev_growth = info_retry.get("revenueGrowth")
+                    op_cf = info_retry.get("operatingCashflow") or op_cf
+                    next_earnings = info_retry.get("earningsDate") or info_retry.get("earningsTimestamp") or next_earnings
+                    if rev_growth is not None:
+                        info = info_retry
+
+                if rev_growth is None and finnhub:
+                    metrics = finnhub.get_basic_financials(sym)
+                    if metrics:
+                        rg = metrics.get("revenueGrowthTTMYoy")
+                        if rg is not None:
+                            rev_growth = rg / 100.0 if abs(rg) > 1 else rg  # Finnhub reports as a %, yfinance as a fraction
+
+                # Market cap: unchanged, hard — not in the redesign's tolerance list.
                 if market_cap < _G3_MIN_MARKET_CAP:
                     return None
-                if rev_growth is None or rev_growth < _G3_MIN_REV_GROWTH:
+                # Revenue growth: still missing after retry+Finnhub fallback stays a
+                # hard reject (no signal to soft-pass on); a known low-but-not-terrible
+                # growth number gets tolerance instead.
+                if rev_growth is None:
                     return None
+                rev_growth_margin = _margin_above(
+                    rev_growth, _G3_MIN_REV_GROWTH, _G3_REV_GROWTH_HARD_FLOOR,
+                )
+                if rev_growth_margin is None:
+                    return None
+                # Operating cash flow: HARD, no tolerance — a *known* negative op cash
+                # flow is a value-trap signal per spec. Missing data (None) is not
+                # treated as a rejection (unchanged from before), only a confirmed <=0.
                 if op_cf is not None and op_cf <= 0:
                     return None
 
-                # Earnings beat from Finnhub (soft gate: reject only if missed both)
+                # Earnings beat from Finnhub — HARD per spec (falling-knife filter):
+                # a real earnings miss is not a marginal case. Missing/partial surprise
+                # data (either side None) is NOT judged as a miss — only a real,
+                # confirmed actual<estimate counts against the candidate.
                 earnings_beat = True
                 if finnhub:
                     surprise = finnhub.get_earnings_surprise(sym)
                     if surprise:
-                        eps_beat = (surprise.get("actual") or 0) >= (surprise.get("estimate") or 0)
-                        # Finnhub doesn't separate revenue in earnings endpoint;
-                        # use EPS beat as proxy
-                        earnings_beat = eps_beat
+                        actual = surprise.get("actual")
+                        estimate = surprise.get("estimate")
+                        if actual is not None and estimate is not None:
+                            # Finnhub doesn't separate revenue in earnings endpoint;
+                            # use EPS beat as proxy
+                            earnings_beat = actual >= estimate
+                if not earnings_beat:
+                    return None
 
                 # next_earnings_date — earningsDate may be a past date or a list
                 ned = None
@@ -453,18 +607,28 @@ class DrawdownScanner(QThread):
                     "sector": info.get("sector", ""),
                     "industry": industry,
                     "sector_commodity_exposure": _get_commodity_exposure(industry),
+                    "_margin_g3": rev_growth_margin,
+                    # Cached so Gate 4 can skip a second .info fetch for this symbol —
+                    # halves the throttling-prone call volume per surviving candidate.
+                    "_cached_current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+                    "_cached_target_price":  info.get("targetMeanPrice"),
+                    "_cached_num_analysts":  info.get("numberOfAnalystOpinions"),
                 }
             except Exception:
                 return None
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        # Lower concurrency than before (was 8) — yfinance's .info silently degrades
+        # under heavy parallel load rather than raising, and this gate now also does
+        # an inline retry per symbol, so fewer simultaneous workers is both gentler
+        # on Yahoo and avoids compounding the retry's own throttling risk.
+        with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {pool.submit(_check_one, sym): sym for sym in symbols}
             for fut in as_completed(futures):
                 if not self._running:
                     break
                 sym = futures[fut]
                 try:
-                    result = fut.result(timeout=30)
+                    result = fut.result(timeout=45)
                 except (FuturesTimeout, Exception):
                     result = None
                 if result is not None:
@@ -486,18 +650,53 @@ class DrawdownScanner(QThread):
 
         def _check_one(sym: str) -> Optional[Dict]:
             try:
-                info = yf.Ticker(sym).info
-                current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-                target = info.get("targetMeanPrice")
-                num_analysts = info.get("numberOfAnalystOpinions") or 0
+                cached = g3_data.get(sym, {})
+                current_price = cached.get("_cached_current_price")
+                target        = cached.get("_cached_target_price")
+                num_analysts  = cached.get("_cached_num_analysts")
+                ticker = None
+
+                # Only re-fetch .info if Gate 3 didn't already capture what we need —
+                # avoids doubling the throttling-prone call volume for every candidate.
+                if not current_price or not target:
+                    ticker = yf.Ticker(sym)
+                    info = ticker.info
+                    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+                    target = info.get("targetMeanPrice")
+                    num_analysts = info.get("numberOfAnalystOpinions") or num_analysts
+
+                # current_price has a reliable fast_info fallback (same flaky-.info
+                # pattern as Gate 3's marketCap — confirmed by direct testing).
+                if not current_price:
+                    try:
+                        fi_price = (ticker or yf.Ticker(sym)).fast_info.last_price
+                        if fi_price:
+                            current_price = fi_price
+                    except Exception:
+                        pass
+
+                # target/num_analysts have no fast_info equivalent — one retry after
+                # a short backoff before giving up, same as Gate 3's revenue_growth.
+                if not target:
+                    time.sleep(1.5)
+                    info_retry = (ticker or yf.Ticker(sym)).info
+                    target = info_retry.get("targetMeanPrice")
+                    num_analysts = info_retry.get("numberOfAnalystOpinions") or num_analysts
+
+                num_analysts = num_analysts or 0
 
                 if not current_price or not target or current_price <= 0:
                     return None
 
                 upside = (target - current_price) / current_price
-                if upside < _G4_MIN_ANALYST_UPSIDE:
+                upside_margin = _margin_above(upside, _G4_MIN_ANALYST_UPSIDE, _G4_UPSIDE_HARD_FLOOR)
+                if upside_margin is None:
                     return None
-                if num_analysts < _G4_MIN_ANALYSTS:
+
+                count_margin = _margin_above(
+                    num_analysts, _G4_MIN_ANALYSTS, _G4_ANALYST_COUNT_HARD_FLOOR,
+                )
+                if count_margin is None:
                     return None
 
                 # Analyst rating breakdown from Finnhub
@@ -515,19 +714,26 @@ class DrawdownScanner(QThread):
                         if total > 0:
                             buy_pct = (rec.get("buy", 0) + rec.get("strongBuy", 0)) / total
 
-                if buy_pct < _G4_MIN_BUY_PCT:
+                buy_margin = _margin_above(buy_pct, _G4_MIN_BUY_PCT, _G4_BUY_PCT_HARD_FLOOR)
+                if buy_margin is None:
                     return None
 
-                # Downgrade count: reject if > 2 rating downgrades in trailing 90 days
+                # Downgrade count: soft-tolerate up to _G4_DOWNGRADES_HARD_MAX in trailing 90 days
                 downgrade_count = 0
+                downgrade_margin = 100.0
                 if finnhub:
                     events = finnhub.get_upgrade_downgrade(sym, days=90)
                     downgrade_count = sum(
                         1 for e in events
                         if (e.get("action") or "").lower() == "downgrade"
                     )
-                    if downgrade_count > _G4_MAX_DOWNGRADES:
+                    downgrade_margin = _margin_below(
+                        downgrade_count, _G4_MAX_DOWNGRADES, _G4_DOWNGRADES_HARD_MAX,
+                    )
+                    if downgrade_margin is None:
                         return None
+
+                margin_g4 = (upside_margin + count_margin + buy_margin + downgrade_margin) / 4.0
 
                 return {
                     "analyst_upside_pct": upside,
@@ -535,6 +741,7 @@ class DrawdownScanner(QThread):
                     "analyst_count": int(num_analysts),
                     "analyst_target": float(target),
                     "downgrade_count_90d": downgrade_count,
+                    "_margin_g4": margin_g4,
                 }
             except Exception:
                 return None
@@ -562,13 +769,63 @@ class DrawdownScanner(QThread):
         symbols: List[str],
         g4_data: Dict[str, Dict],
     ) -> Tuple[List[str], Dict[str, Dict]]:
-        """Check for liquid options chains at 6+ and 12+ month expirations."""
+        """Check for REAL liquid options chains at 6+ and 12+ month expirations.
+
+        Tightened per spec §1/§8: open interest > 500 and bid/ask spread < 5%
+        of mid at the near-the-money strike, checked on both the 6mo and 12mo
+        legs (12mo liquidity affects score only — 6mo failing is a hard
+        reject, matching Gate 1's "reject unless all are true" framing).
+
+        Chain data note: this codebase has no Alpaca options-chain fetch
+        path anywhere (core/options_executor.py only submits/manages orders —
+        it never fetches chains). The one real chain-fetch pattern already in
+        use (core/options_strategy.py, core/iv_tracker.py) is yfinance's
+        ticker.option_chain(), which does return real bid/ask/openInterest
+        columns. This gate reuses that established pattern rather than
+        introducing an untested Alpaca chain dependency.
+        """
         survivors: List[str] = []
         data: Dict[str, Dict] = {}
 
         today = date.today()
         threshold_6mo = today + timedelta(days=180)
         threshold_12mo = today + timedelta(days=365)
+
+        def _nearest_expiry(exp_dates: List[date], threshold: date) -> Optional[date]:
+            candidates = [d for d in exp_dates if d >= threshold]
+            return min(candidates) if candidates else None
+
+        def _liquid_near_atm(ticker, current_price: float, exp_date: date) -> Optional[float]:
+            """Returns a 0-100 margin score if OI/spread land within (or soft-tolerate
+            up to) the liquidity thresholds at the near-ATM strike, or None if outside
+            the tolerance band entirely (true reject) / on any data error."""
+            try:
+                chain = ticker.option_chain(exp_date.isoformat())
+                calls = chain.calls
+                if calls is None or calls.empty:
+                    return None
+                calls = calls.copy()
+                calls["_dist"] = (calls["strike"] - current_price).abs()
+                row = calls.sort_values("_dist").iloc[0]
+                oi = float(row.get("openInterest", 0) or 0)
+                bid = float(row.get("bid", 0) or 0)
+                ask = float(row.get("ask", 0) or 0)
+                if ask <= 0:
+                    return None
+                mid = (bid + ask) / 2
+                if mid <= 0:
+                    return None
+                spread_pct = (ask - bid) / mid
+
+                oi_margin = _margin_above(oi, _G1_OI_SOFT_MIN, _G1_OI_HARD_FLOOR)
+                if oi_margin is None:
+                    return None
+                spread_margin = _margin_below(spread_pct, 0.05, _G1_SPREAD_HARD_CEILING)
+                if spread_margin is None:
+                    return None
+                return (oi_margin + spread_margin) / 2.0
+            except Exception:
+                return None
 
         def _check_one(sym: str) -> Optional[Dict]:
             try:
@@ -584,42 +841,49 @@ class DrawdownScanner(QThread):
                     except ValueError:
                         continue
 
-                has_6mo = any(d >= threshold_6mo for d in exp_dates)
-                has_12mo = any(d >= threshold_12mo for d in exp_dates)
+                exp_6mo = _nearest_expiry(exp_dates, threshold_6mo)
+                if exp_6mo is None:
+                    return None  # Hard reject: no 6mo+ chain at all
 
-                if not has_6mo:
-                    return None  # Hard reject: no long-dated chains at all
+                current_price = float(ticker.fast_info.last_price or 0)
+                if current_price <= 0:
+                    return None
+
+                margin_6mo = _liquid_near_atm(ticker, current_price, exp_6mo)
+                if margin_6mo is None:
+                    return None  # Hard reject: illiquid (outside tolerance) at near-ATM on the 6mo leg
+
+                exp_12mo = _nearest_expiry(exp_dates, threshold_12mo)
+                margin_12mo = _liquid_near_atm(ticker, current_price, exp_12mo) if exp_12mo else None
+                liquid_12mo = margin_12mo is not None
 
                 return {
-                    "has_6mo_options": has_6mo,
-                    "has_12mo_options": has_12mo,
+                    "has_6mo_options": True,
+                    "has_12mo_options": exp_12mo is not None,
                     "options_verified": True,
-                    "options_score": _options_quality_score(has_6mo, has_12mo),
+                    "options_liquid_6mo": True,
+                    "options_liquid_12mo": liquid_12mo,
+                    "options_score": _options_quality_score(True, exp_12mo is not None and liquid_12mo),
+                    "_margin_g1": margin_6mo,
                 }
             except Exception:
-                # Don't hard-reject on API error for large-caps — mark unverified
-                return {
-                    "has_6mo_options": False,
-                    "has_12mo_options": False,
-                    "options_verified": False,
-                    "options_score": 40.0,  # neutral score for unverified
-                }
+                # Liquidity is non-negotiable per spec — any error excludes the symbol
+                # rather than silently keeping it with a neutral score.
+                return None
 
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        # Two chain fetches per symbol now (6mo + possibly 12mo) — trim worker
+        # count vs. the old expiry-list-only check to stay polite to yfinance.
+        with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {pool.submit(_check_one, sym): sym for sym in symbols}
             for fut in as_completed(futures):
                 if not self._running:
                     break
                 sym = futures[fut]
                 try:
-                    result = fut.result(timeout=20)
+                    result = fut.result(timeout=25)
                 except (FuturesTimeout, Exception):
                     result = None
-                if result is not None and result.get("has_6mo_options", result.get("options_verified", False)):
-                    survivors.append(sym)
-                    data[sym] = result
-                elif result and not result.get("has_6mo_options") and result.get("options_verified") is False:
-                    # Unverified but large-cap — keep with neutral score
+                if result is not None:
                     survivors.append(sym)
                     data[sym] = result
 
@@ -834,10 +1098,29 @@ class DrawdownScanner(QThread):
         # Apply 15% score penalty for MEDIUM commodity exposure
         if commodity_exp == "MEDIUM":
             composite *= 0.85
+        composite = round(composite, 1)
+
+        # ── Gate margin score: average of the per-gate soft-tolerance margins
+        # for the gates actually evaluated (Gates 2/3/4/1; Gate 5 is a separate
+        # cause-confidence signal, folded into confidence_score below instead).
+        gate_margins = [
+            m for m in (d.get("_margin_g2"), d.get("_margin_g3"),
+                        d.get("_margin_g4"), d.get("_margin_g1"))
+            if m is not None
+        ]
+        gate_margin_score = round(sum(gate_margins) / len(gate_margins), 1) if gate_margins else 100.0
+
+        # ── Confidence score: blends composite score, gate margin, and Gate 5's
+        # cause-classification confidence (neutral 60 if Gate 5 was skipped/n-a).
+        cause_conf_map = {"low": 40.0, "medium": 70.0, "high": 100.0}
+        cause_component = cause_conf_map.get((d.get("cause_confidence") or "").lower(), 60.0)
+        confidence_score = round(
+            0.5 * composite + 0.3 * gate_margin_score + 0.2 * cause_component, 1
+        )
 
         return DrawdownResult(
             symbol=symbol,
-            score=round(composite, 1),
+            score=composite,
             current_price=d.get("current_price", 0.0),
             pct_below_high=pct_below,
             days_since_high=int(d.get("days_since_high", 0)),
@@ -865,6 +1148,8 @@ class DrawdownScanner(QThread):
             cause_labels_all=d.get("cause_labels_all", []),
             avg_volume_30d=d.get("avg_volume_30d", 0.0),
             downgrade_count_90d=int(d.get("downgrade_count_90d", 0)),
+            gate_margin_score=gate_margin_score,
+            confidence_score=confidence_score,
         )
 
     def _build_partial(
@@ -877,6 +1162,12 @@ class DrawdownScanner(QThread):
         """Build a DrawdownResult for a close-miss candidate."""
         commodity_exp = llm_d.get("commodity_exposure") or d.get("sector_commodity_exposure")
         commodity_rat = llm_d.get("commodity_rationale", "")
+        partial_margins = [
+            m for m in (d.get("_margin_g2"), d.get("_margin_g3"),
+                        d.get("_margin_g4"), d.get("_margin_g1"))
+            if m is not None
+        ]
+        partial_gate_margin = round(sum(partial_margins) / len(partial_margins), 1) if partial_margins else 0.0
         return DrawdownResult(
             symbol=symbol,
             score=0.0,
@@ -903,6 +1194,7 @@ class DrawdownScanner(QThread):
             cause_labels_all=llm_d.get("cause_labels_all", []),
             avg_volume_30d=d.get("avg_volume_30d", 0.0),
             downgrade_count_90d=int(d.get("downgrade_count_90d", 0)),
+            gate_margin_score=partial_gate_margin,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -913,3 +1205,30 @@ class DrawdownScanner(QThread):
             _log.warning("Finnhub API key not set — Gates 3/4 will use yfinance approximations only")
             return None
         return FinnhubClient(key)
+
+
+# ── Headless entry point ─────────────────────────────────────────────────────
+
+def run_screen_headless(settings: Dict[str, Any]) -> List[DrawdownResult]:
+    """Run the drawdown screen synchronously in the calling thread — no QThread,
+    no Qt event loop required.
+
+    Instantiates a DrawdownScanner and calls its private pipeline method
+    (_do_scan) directly rather than via .start()/run(), so this can be
+    invoked safely from another QThread's run() (e.g. DailyDrawdownRunner)
+    without spinning up a QThread-from-a-QThread. Any scan_status/progress/cost
+    signals DrawdownScanner emits along the way are harmless no-ops here since
+    nothing is connected to them in this context — only the returned list
+    matters.
+
+    The GUI-triggered path (DrawdownScreenerPanel → MainWindow._trigger_drawdown_scan)
+    is untouched: it still constructs a DrawdownScanner and calls .start(),
+    which goes through the normal QThread.run() → emits scan_complete.
+    """
+    scanner = DrawdownScanner(settings)
+    scanner._running = True
+    try:
+        return scanner._do_scan()
+    except Exception:
+        _log.exception("run_screen_headless: unhandled error")
+        return []

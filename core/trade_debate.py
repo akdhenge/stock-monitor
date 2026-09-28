@@ -10,8 +10,8 @@ Design rules:
 - Regime-aware: bear-market prompt explicitly frames the setup as a
   mean-reversion trade and asks whether the oversold thesis is sound.
   Bull-market prompt looks for momentum continuation quality.
-- Fail-safe: Claude API errors return (True, "debate unavailable") so trading
-  is never blocked by a temporary API failure.
+- Fail-closed: Claude API errors or unparseable responses return (False, ...) —
+  a debate that can't be evaluated is a rejection, not a silent approval.
 - Model is configurable via trader_config.json key "debate_model".
   Default: claude-sonnet-4-6.  Set to claude-opus-4-7 for higher conviction.
 """
@@ -46,8 +46,8 @@ def run_debate(
       proceed=True  → trade confirmed, continue to execution.
       proceed=False → skip this symbol this scan cycle only.
 
-    On Claude API failure returns (True, "debate unavailable") so a transient
-    API error never silently blocks all trading for the session.
+    On Claude API failure or unparseable response, returns (False, ...) —
+    fails closed rather than silently approving a trade nobody actually evaluated.
     """
     settings = settings or {}
     api_key  = settings.get("ai_claude_api_key", "").strip()
@@ -94,11 +94,11 @@ def run_debate(
 
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="replace")[:200]
-        _log.warning("trade_debate: Claude API %s for %s — %s — proceeding", exc, symbol, err_body)
-        return True, f"debate unavailable ({exc}) — proceeding"
+        _log.warning("trade_debate: Claude API %s for %s — %s — rejecting", exc, symbol, err_body)
+        return False, f"debate unavailable ({exc}) — rejected"
     except Exception as exc:
-        _log.warning("trade_debate: error for %s (%s) — proceeding", symbol, exc)
-        return True, "debate unavailable — proceeding"
+        _log.warning("trade_debate: error for %s (%s) — rejecting", symbol, exc)
+        return False, "debate unavailable — rejected"
 
 
 # ── Regime-aware prompt ────────────────────────────────────────────────────────
@@ -263,7 +263,7 @@ def run_options_debate(
     """
     Evaluate an options play before execution.
     Returns (proceed, verdict_summary).
-    Fail-safe: API errors return (True, "debate unavailable").
+    Fail-closed: API errors or unparseable responses return (False, ...).
     """
     settings = settings or {}
     api_key  = settings.get("ai_claude_api_key", "").strip()
@@ -309,11 +309,11 @@ def run_options_debate(
 
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="replace")[:200]
-        _log.warning("options_debate: Claude API %s for %s — %s — proceeding", exc, symbol, err_body)
-        return True, f"debate unavailable ({exc}) — proceeding"
+        _log.warning("options_debate: Claude API %s for %s — %s — rejecting", exc, symbol, err_body)
+        return False, f"debate unavailable ({exc}) — rejected"
     except Exception as exc:
-        _log.warning("options_debate: error for %s (%s) — proceeding", symbol, exc)
-        return True, "debate unavailable — proceeding"
+        _log.warning("options_debate: error for %s (%s) — rejecting", symbol, exc)
+        return False, "debate unavailable — rejected"
 
 
 def _build_options_prompt(
@@ -420,7 +420,7 @@ def _parse_verdict(raw: str) -> Tuple[str, str]:
     if m:
         try:
             data    = json.loads(m.group())
-            verdict = data.get("verdict", "BUY").upper().strip()
+            verdict = data.get("verdict", "PASS").upper().strip()
             reason  = str(data.get("reason", data.get("bull", text[:120])))
             return ("BUY" if verdict == "BUY" else "PASS"), reason
         except json.JSONDecodeError:
@@ -431,7 +431,7 @@ def _parse_verdict(raw: str) -> Tuple[str, str]:
     if vm:
         return vm.group(1).upper(), text[:200]
 
-    # Default to BUY on parse failure — don't block a trade on bad JSON
-    return "BUY", f"parse fallback: {text[:80]}"
+    # Default to PASS (reject) on parse failure — an unparseable response is not an approval
+    return "PASS", f"debate parse failed — defaulted to reject: {text[:80]}"
 
 

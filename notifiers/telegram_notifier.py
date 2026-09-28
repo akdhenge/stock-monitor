@@ -80,6 +80,27 @@ class TelegramNotifier(BaseNotifier):
             return False
 
     @staticmethod
+    def send_chunked(token: str, chat_id: str, text: str, chunk_limit: int = 3800) -> bool:
+        """Send `text`, splitting on newlines into <=chunk_limit-char pieces when
+        it exceeds Telegram's 4096-char message cap. Returns True if every chunk
+        sent successfully (matches the inline chunking pattern already used in
+        gui/main_window.py for /detail and /performance-style long replies)."""
+        if len(text) <= 4096:
+            return TelegramNotifier.send_message(token, chat_id, text)
+        lines = text.split("\n")
+        ok = True
+        chunk: List[str] = []
+        for line in lines:
+            if sum(len(l) for l in chunk) + len(line) + len(chunk) > chunk_limit:
+                if chunk:
+                    ok = TelegramNotifier.send_message(token, chat_id, "\n".join(chunk)) and ok
+                chunk = []
+            chunk.append(line)
+        if chunk:
+            ok = TelegramNotifier.send_message(token, chat_id, "\n".join(chunk)) and ok
+        return ok
+
+    @staticmethod
     def get_updates(token: str) -> Tuple[bool, Optional[str], str]:
         """
         Poll getUpdates to auto-detect a chat_id.

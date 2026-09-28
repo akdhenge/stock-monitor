@@ -570,6 +570,47 @@ td:nth-child(2) b {
   word-break: break-word;
 }
 
+/* ── Trades tab ── */
+.trades-subhead {
+  color: var(--accent);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 14px 0 6px;
+}
+.trades-subhead:first-of-type {
+  margin-top: 4px;
+}
+
+.trade-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-family: var(--font-mono);
+}
+.trade-row:last-child {
+  border-bottom: none;
+}
+
+.trade-symbol {
+  color: var(--green);
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.trade-detail {
+  color: #ccc;
+  font-size: 12px;
+}
+
+.trade-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* ── Chips ── */
 .chip {
   display: inline-block;

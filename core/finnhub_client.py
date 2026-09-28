@@ -4,6 +4,7 @@ Free tier: 60 calls/minute. No caching here — caller is responsible.
 """
 import json
 import logging
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, timedelta
@@ -25,6 +26,17 @@ class FinnhubClient:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                # Some endpoints (e.g. /stock/upgrade-downgrade) are premium-only on
+                # Finnhub's free tier — this is an expected, already-handled fail-safe
+                # (callers treat a None/[] response as "unknown", not a rejection), not
+                # a broken key. Log quietly so real key/quota problems aren't lost in
+                # the noise of an endpoint we know we can't use.
+                _log.debug("Finnhub %s: 403 (premium-only endpoint, expected)", path)
+            else:
+                _log.warning("Finnhub %s failed: %s", path, exc)
+            return None
         except Exception as exc:
             _log.warning("Finnhub %s failed: %s", path, exc)
             return None

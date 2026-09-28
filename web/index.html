@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="app-v2.css">
+  <link rel="stylesheet" href="app-v2.css?v=20260819a">
   <link rel="manifest" href="manifest.webmanifest">
 </head>
 
@@ -116,6 +116,7 @@
     <button role="tab" data-panel="panel-ranking" aria-selected="false">Claude Ranking</button>
     <button role="tab" data-panel="panel-history" aria-selected="false">History</button>
     <button role="tab" data-panel="panel-agent" aria-selected="false">Agent</button>
+    <button role="tab" data-panel="panel-trades" aria-selected="false">Trades</button>
   </nav>
 
   <section id="panel-top-picks" class="tab-panel active" role="tabpanel">
@@ -149,6 +150,10 @@
     <div class="empty-state">Loading agent status…</div>
   </section>
 
+  <section id="panel-trades" class="tab-panel" role="tabpanel">
+    <div class="empty-state">Loading trade log…</div>
+  </section>
+
   <footer>
     For personal use — definitely NOT financial advice. Pls don't sue.
     <div style="margin-top: 12px;">
@@ -161,7 +166,7 @@
   </footer>
 
   <script async src="https://tenor.com/embed.js"></script>
-  <script src="app-v2.js"></script>
+  <script src="app-v2.js?v=20260819a"></script>
 </body>
 
 </html>

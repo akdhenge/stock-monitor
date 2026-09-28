@@ -34,6 +34,13 @@ class DrawdownResult:
     cause_labels_all: list = field(default_factory=list)  # all causes identified by LLM
     avg_volume_30d: float = 0.0               # 30-day avg daily volume
     downgrade_count_90d: int = 0              # analyst rating downgrades in last 90 days
+    gate_margin_score: float = 0.0            # 0-100 avg of per-gate soft-tolerance margins;
+                                               # 0.0 = unset (pre-soft-gate saved data or no gates evaluated)
+    confidence_score: float = 0.0             # 0-100; drives spread_builder's horizon/strike tier.
+                                               # 0.0 = unset — spread_builder treats <=0 as neutral (~60),
+                                               # NOT as the lowest tier, so stale pre-redesign
+                                               # drawdown_results.json rows don't silently get pushed
+                                               # into the deepest-OTM/longest-DTE tier.
     timestamp: datetime = field(default_factory=datetime.now)
 
 

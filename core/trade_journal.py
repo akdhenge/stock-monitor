@@ -153,6 +153,7 @@ def log_options_fill(
     exit_reason: Optional[str] = None,
     cycle_id: Optional[str] = None,
     exec_ms: Optional[int] = None,
+    extra: Optional[Dict] = None,
 ) -> None:
     record: Dict[str, Any] = {
         "type":          "fill",
@@ -171,6 +172,7 @@ def log_options_fill(
     if exit_reason  is not None: record["exit_reason"]  = exit_reason
     if cycle_id     is not None: record["cycle_id"]     = cycle_id
     if exec_ms      is not None: record["exec_ms"]      = exec_ms
+    if extra:                    record.update(extra)
     _append(record)
 
 

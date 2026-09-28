@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 from PyQt5.QtCore import Qt, QTimer
@@ -132,6 +132,9 @@ class MainWindow(QMainWindow):
         # TradingAgents pre-market batch runner
         self._ta_batch_runner = None
 
+        # Daily headless drawdown screen runner (feeds the debit-spread sleeve)
+        self._daily_drawdown_runner = None
+
         self._setup_ui()
         self._apply_settings(self._settings)
         self._watchlist_table.refresh(self._watchlist)
@@ -139,6 +142,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(500, self._start_poller)
         QTimer.singleShot(1000, self._start_trader_agent)
         QTimer.singleShot(2000, self._start_ta_batch_runner)
+        QTimer.singleShot(2500, self._start_daily_drawdown_runner)
 
         # 60-second tick for scheduled scans
         self._schedule_timer = QTimer(self)
@@ -330,6 +334,9 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_pause.connect(self._on_cmd_pause)
         self._cmd_poller.cmd_resume.connect(self._on_cmd_resume)
         self._cmd_poller.cmd_sell.connect(self._on_cmd_sell)
+        self._cmd_poller.cmd_approvespread.connect(self._on_cmd_approvespread)
+        self._cmd_poller.cmd_closespread.connect(self._on_cmd_closespread)
+        self._cmd_poller.cmd_spreads.connect(self._on_cmd_spreads)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -479,6 +486,12 @@ class MainWindow(QMainWindow):
     def _check_scheduled_scans(self) -> None:
         now = datetime.now()
         current_hhmm = now.strftime("%H:%M")
+
+        try:
+            with open("data/heartbeat.txt", "w", encoding="utf-8") as f:
+                f.write(datetime.now(timezone.utc).isoformat())
+        except OSError:
+            pass
 
         # Deep scan — hourly
         if self._settings.get("scanner_deep_scan_enabled"):
@@ -1625,6 +1638,9 @@ class MainWindow(QMainWindow):
         if self._ta_batch_runner is not None and self._ta_batch_runner.isRunning():
             self._ta_batch_runner.stop()
             self._ta_batch_runner.wait(3000)
+        if self._daily_drawdown_runner is not None and self._daily_drawdown_runner.isRunning():
+            self._daily_drawdown_runner.stop()
+            self._daily_drawdown_runner.wait(3000)
         event.accept()
 
     # ── Trader Agent ──────────────────────────────────────────────────────────
@@ -1649,6 +1665,27 @@ class MainWindow(QMainWindow):
             lambda msg: self._scan_status_label.setText(f"[TA] {msg}")
         )
         self._ta_batch_runner.start()
+
+    def _start_daily_drawdown_runner(self) -> None:
+        """Fires the headless drawdown screen once per day at
+        drawdown_scan_time_et, feeding the options_debit_spread sleeve.
+        Independent of the GUI-manual drawdown scanner tab — both write to
+        the same data/drawdown_results.json store."""
+        from core.daily_drawdown_runner import DailyDrawdownRunner
+        self._daily_drawdown_runner = DailyDrawdownRunner(get_settings=lambda: self._settings, parent=self)
+        self._daily_drawdown_runner.scan_status.connect(
+            lambda msg: self._scan_status_label.setText(f"[Drawdown] {msg}")
+        )
+        self._daily_drawdown_runner.scan_complete.connect(self._on_daily_drawdown_complete)
+        self._daily_drawdown_runner.start()
+
+    def _on_daily_drawdown_complete(self, results: list) -> None:
+        """Persist/display results (same as the GUI-manual scan path) and
+        hand them to TraderAgent to run the debit-spread proposal/exit cycle.
+        Never places or closes an order itself."""
+        self._on_drawdown_complete(results)
+        if self._trader_agent is not None and self._trader_agent.isRunning():
+            self._trader_agent.queue_propose_spreads(results)
 
     def _on_agent_trade(self, trade: dict) -> None:
         action = trade.get("action", "")
@@ -1811,3 +1848,28 @@ class MainWindow(QMainWindow):
         self._trader_agent.queue_forced_sell(symbol)
         TelegramNotifier.send_message(token, reply_chat_id,
             f"Forced sell queued for <b>{symbol}</b>. Will execute on next tick.")
+
+    # ── Debit-spread sleeve commands ──────────────────────────────────────────
+
+    def _on_cmd_approvespread(self, symbol: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        if self._trader_agent is None or not self._trader_agent.isRunning():
+            TelegramNotifier.send_message(token, reply_chat_id, "Trader agent is not running.")
+            return
+        self._trader_agent.queue_approve_spread(symbol, reply_chat_id)
+
+    def _on_cmd_closespread(self, symbol: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        if self._trader_agent is None or not self._trader_agent.isRunning():
+            TelegramNotifier.send_message(token, reply_chat_id, "Trader agent is not running.")
+            return
+        self._trader_agent.queue_close_spread(symbol, reply_chat_id)
+
+    def _on_cmd_spreads(self, reply_chat_id: str) -> None:
+        from core.debit_spread_trader import format_spreads_status
+        token = self._settings.get("telegram_token", "")
+        try:
+            msg = format_spreads_status()
+        except Exception as exc:
+            msg = f"Spreads status error: {exc}"
+        TelegramNotifier.send_chunked(token, reply_chat_id, msg)

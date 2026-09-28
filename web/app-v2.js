@@ -323,16 +323,18 @@ async function refresh() {
 
     if (changed) {
       state.lastSeenUtc = meta.last_updated_utc;
-      const [latest, watchlist, alerts, aiIndex] = await Promise.all([
+      const [latest, watchlist, alerts, aiIndex, trades] = await Promise.all([
         fetchJSON(`${DATA_BASE}/latest.json`),
         fetchJSON(`${DATA_BASE}/watchlist.json`),
         fetchJSON(`${DATA_BASE}/alerts.json`),
         fetchJSON(`${DATA_BASE}/ai_research/index.json`).catch(() => ({ entries: [] })),
+        fetchJSON(`${DATA_BASE}/trades.json`).catch(() => null),
       ]);
       state.latest    = latest;
       state.watchlist = watchlist;
       state.alerts    = alerts;
       state.aiIndex   = aiIndex;
+      state.trades    = trades;
       renderAll();
     }
   } catch (err) {
@@ -391,6 +393,7 @@ function renderAll() {
   renderAIResearch();
   renderHistory();
   renderAgentStatus();
+  renderTrades();
 }
 
 // ── Top Picks ──────────────────────────────────────────────────────────────
@@ -785,6 +788,95 @@ function renderAgentStatus() {
   } else {
     html += `<div class="card"><div class="empty-state" style="padding:20px 0">No activity logged yet.</div></div>`;
   }
+
+  el.innerHTML = html;
+}
+
+// ── Trades ─────────────────────────────────────────────────────────────────
+
+function renderTrades() {
+  const el = document.getElementById("panel-trades");
+  if (!el) return;
+  const data = state.trades;
+
+  if (!data) {
+    el.innerHTML = '<div class="empty-state">No trade data yet — trades.json not found.<br>Published after the next scan/publish cycle.</div>';
+    return;
+  }
+
+  let html = "";
+
+  // ── Debit spreads: pending proposals + open positions ──
+  const ds = data.debit_spreads || {};
+  const pendEntry = ds.pending_entry || [];
+  const pendClose = ds.pending_close || [];
+  const openPos   = ds.open_positions || [];
+
+  html += `<div class="card"><div class="card-title">Debit Spread Sleeve</div>`;
+
+  if (pendEntry.length) {
+    html += `<div class="trades-subhead">Pending entry proposals (awaiting /approvespread)</div>`;
+    pendEntry.forEach(p => {
+      html += `<div class="trade-row">
+        <span class="trade-symbol">${escHtml(p.symbol)}</span>
+        <span class="trade-detail">$${fmtNum(p.long_strike)}/$${fmtNum(p.short_strike)}C exp ${escHtml(p.expiration)}
+          &middot; debit $${fmtNum(p.net_debit)} &middot; x${p.suggested_contracts ?? "—"}</span>
+        <span class="trade-meta">confidence ${fmtNum(p.confidence_score)} (${escHtml(p.horizon_label || "—")}) &middot; ${escHtml(p.cause_label || "")}</span>
+      </div>`;
+    });
+  }
+
+  if (pendClose.length) {
+    html += `<div class="trades-subhead">Pending close proposals (awaiting /closespread)</div>`;
+    pendClose.forEach(p => {
+      html += `<div class="trade-row">
+        <span class="trade-symbol">${escHtml(p.symbol)}</span>
+        <span class="trade-detail">${escHtml(p.close_reason || "")}</span>
+      </div>`;
+    });
+  }
+
+  if (openPos.length) {
+    html += `<div class="trades-subhead">Open positions</div>`;
+    openPos.forEach(p => {
+      html += `<div class="trade-row">
+        <span class="trade-symbol">${escHtml(p.symbol)}</span>
+        <span class="trade-detail">$${fmtNum(p.long_strike)}/$${fmtNum(p.short_strike)}C exp ${escHtml(p.expiration)}
+          &middot; entry debit $${fmtNum(p.entry_premium)} &middot; max loss $${fmtNum(p.max_loss)}</span>
+        <span class="trade-meta">opened ${relativeTime(p.opened_at)}</span>
+      </div>`;
+    });
+  }
+
+  if (!pendEntry.length && !pendClose.length && !openPos.length) {
+    html += `<div class="empty-state" style="padding:12px 0">No pending proposals or open debit-spread positions.</div>`;
+  }
+  html += `</div>`;
+
+  // ── Recent fills (both sleeves) ──
+  const fills = data.recent_fills || [];
+  html += `<div class="card"><div class="card-title">Recent Fills</div>`;
+  if (fills.length) {
+    html += `<div class="agent-steps">`;
+    fills.forEach(f => {
+      const isOption = f.instrument === "option";
+      const qty = isOption ? `${f.contracts ?? "—"} ctr` : `${fmtNum(f.shares)} sh`;
+      const pnl = f.realized_pnl != null
+        ? ` &middot; P&amp;L ${f.realized_pnl >= 0 ? "+" : ""}$${fmtNum(f.realized_pnl)}`
+        : "";
+      const dot = f.side === "SELL" || f.side === "CLOSE" ? "step-trade" : "step-ok";
+      html += `<div class="agent-step">
+        <span class="step-dot ${dot}"></span>
+        <span class="step-time">${relativeTime(f.ts)}</span>
+        <span class="step-text">${escHtml(f.symbol)} ${escHtml(f.side)}${isOption ? " (" + escHtml(f.strategy_type || "option") + ")" : ""}
+          ${qty} @ $${fmtNum(f.fill_price)}${pnl}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  } else {
+    html += `<div class="empty-state" style="padding:12px 0">No fills yet.</div>`;
+  }
+  html += `</div>`;
 
   el.innerHTML = html;
 }

@@ -39,6 +39,15 @@ _CONFIG_DEFAULTS: Dict = {
     "earnings_block_days":    3,
     "trader_scan_times_et":   ["09:35", "10:30", "12:00", "14:00", "15:30"],
     "debate_model":           "claude-sonnet-4-6",
+    "legacy_multi_strategy_options_enabled": False,
+    "stock_sleeve_pct":               0.5,
+    "options_sleeve_pct":              0.5,
+    "debit_spread_max_loss_pct":       0.05,
+    "debit_spread_max_hold_days":      545,
+    "debit_spread_profit_take_pct":    0.70,
+    "debit_spread_target_proximity_pct": 0.05,
+    "drawdown_scan_time_et":           "07:30",
+    "drawdown_max_candidates_per_cycle": 10,
 }
 
 

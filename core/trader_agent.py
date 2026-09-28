@@ -40,6 +40,7 @@ from core.risk_manager import (
     check_circuit_breaker, check_exit, check_hard_gates,
     compute_conviction_score, compute_decision_score, compute_sector_exposure, size_position,
 )
+from core.capital_ledger import sleeve_budget_remaining
 from core.trade_journal import log_decision, log_fill, log_options_decision
 from core.performance_tracker import maybe_snapshot
 from core.self_tuner import run_tuning_cycle, should_tune
@@ -170,6 +171,29 @@ class TraderAgent(QThread):
         except queue.Full:
             _log.warning("TraderAgent: queue full — forced sell %s dropped", symbol)
 
+    def queue_propose_spreads(self, results: list) -> None:
+        """Called by MainWindow when the daily headless drawdown screen finishes.
+        Runs the options_debit_spread proposal/exit-check cycle — never places
+        an order itself. Safe to call from any thread."""
+        try:
+            self._queue.put_nowait(("propose_spreads", results))
+        except queue.Full:
+            _log.warning("TraderAgent: queue full — propose_spreads dropped")
+
+    def queue_approve_spread(self, symbol: str, reply_chat_id: str) -> None:
+        """Called by MainWindow on /approvespread SYMBOL. Safe to call from any thread."""
+        try:
+            self._queue.put_nowait(("approve_spread", (symbol.upper(), reply_chat_id)))
+        except queue.Full:
+            _log.warning("TraderAgent: queue full — approve_spread %s dropped", symbol)
+
+    def queue_close_spread(self, symbol: str, reply_chat_id: str) -> None:
+        """Called by MainWindow on /closespread SYMBOL. Safe to call from any thread."""
+        try:
+            self._queue.put_nowait(("close_spread", (symbol.upper(), reply_chat_id)))
+        except queue.Full:
+            _log.warning("TraderAgent: queue full — close_spread %s dropped", symbol)
+
     # ── QThread entry point ────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -221,11 +245,23 @@ class TraderAgent(QThread):
             try:
                 if msg_type == "scan":
                     vix_val, spy_hist = self._process_scan(data)
-                    self._process_options_scan(data, vix_val=vix_val, spy_hist=spy_hist)
+                    # Legacy multi-strategy options engine (bull_call_spread/csp/iron_condor/
+                    # bear_put_spread) is disabled from the live loop as of the 50/50 capital
+                    # split — the stock sleeve trades no options at all, and the options sleeve
+                    # trades debit spreads only, proposed manually (see debit_spread_trader.py).
+                    # Function kept intact for reference; re-enable via config if ever needed.
+                    if load_trader_config().get("legacy_multi_strategy_options_enabled", False):
+                        self._process_options_scan(data, vix_val=vix_val, spy_hist=spy_hist)
                 elif msg_type == "prices":
                     self._process_price_tick(data)
                 elif msg_type == "sell":
                     self._process_forced_sell(data)
+                elif msg_type == "propose_spreads":
+                    self._process_propose_spreads(data)
+                elif msg_type == "approve_spread":
+                    self._process_approve_spread(*data)
+                elif msg_type == "close_spread":
+                    self._process_close_spread(*data)
             except Exception:
                 _log.exception("TraderAgent: unhandled error processing msg_type=%r — continuing", msg_type)
 
@@ -370,10 +406,17 @@ class TraderAgent(QThread):
             _log.error("TraderAgent: could not fetch positions: %s", exc)
             return
 
-        open_symbols     = [p["symbol"] for p in alpaca_positions]
-        position_values  = {p["symbol"]: p.get("market_value", 0) or 0 for p in alpaca_positions}
+        # Stock sleeve only — option positions (debit spreads) have their own
+        # capital pool and are never counted against stock gates/sizing.
+        stock_positions  = [p for p in alpaca_positions if p.get("asset_class") != "us_option"]
+        open_symbols     = [p["symbol"] for p in stock_positions]
+        position_values  = {p["symbol"]: p.get("market_value", 0) or 0 for p in stock_positions}
         meta_all         = load_all_meta()
         sector_exposure  = compute_sector_exposure(meta_all, position_values, nav)
+
+        stock_budget = sleeve_budget_remaining("stock", nav, cash, alpaca_positions, config)
+        self._log_step(f"Stock sleeve budget: ${stock_budget:,.0f} remaining "
+                        f"(cap {config.get('stock_sleeve_pct', 0.5)*100:.0f}% NAV)")
 
         # Load ClaudeRankingAnalyst cache
         ranking = self._load_ranking_cache()
@@ -450,7 +493,7 @@ class TraderAgent(QThread):
                 ai_research=ai_research,
                 open_symbols=open_symbols,
                 sector_exposure=sector_exposure,
-                cash=cash,
+                cash=stock_budget,
                 nav=nav,
                 config=effective_config,
             )
@@ -516,7 +559,7 @@ class TraderAgent(QThread):
                 volatility=scan_result.volatility_20d,
                 regime_label=regime.label,
                 nav=nav,
-                cash=cash,
+                cash=stock_budget,
                 config=effective_config,
             )
             if dollars <= 0:
@@ -748,16 +791,19 @@ class TraderAgent(QThread):
         self._check_position_news(meta_all)
         self._write_agent_status()
 
-        # Options exits and covered call overlay
+        # Options exits (existing/legacy positions only — no new overlay entries).
+        # Covered-call overlay is disabled: the stock sleeve trades no options at
+        # all under the 50/50 capital split (see legacy_multi_strategy_options_enabled).
         if config.get("options_enabled", False) and self._options_executor:
             try:
                 self._check_options_exits(config)
             except Exception as exc:
                 _log.warning("Options exits check error: %s", exc)
-            try:
-                self._evaluate_covered_call_overlay(config, nav)
-            except Exception as exc:
-                _log.warning("Covered call overlay error: %s", exc)
+            if config.get("legacy_multi_strategy_options_enabled", False):
+                try:
+                    self._evaluate_covered_call_overlay(config, nav)
+                except Exception as exc:
+                    _log.warning("Covered call overlay error: %s", exc)
 
         # IV snapshot — builds history for IVR computation (Phase 2 options)
         try:
@@ -903,9 +949,16 @@ class TraderAgent(QThread):
         if pos is None:
             return
 
+        # round() uses banker's rounding — round(1/2, 0) is 0.0, not 1.0 — so a
+        # position already down to its last share silently no-ops here forever
+        # instead of selling anything. If halving would leave nothing meaningful,
+        # sell the whole remaining position instead of skipping the exit entirely.
         half_qty = round(pos["qty"] / 2, 0)
         if half_qty < 1:
-            return
+            if pos["qty"] >= 1:
+                half_qty = pos["qty"]
+            else:
+                return
 
         from alpaca.trading.requests import MarketOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
@@ -1007,6 +1060,70 @@ class TraderAgent(QThread):
             return min(future) if future else None
         except Exception:
             return None
+
+    # ── Debit-spread sleeve (proposal + explicit-approval only) ────────────────
+
+    def _process_propose_spreads(self, results: list) -> None:
+        """Runs once per day after the headless drawdown screen completes
+        (see core/daily_drawdown_runner.py). Proposes new debit spreads and
+        checks open ones for exit conditions — never places or closes an
+        order itself."""
+        if self._executor is None or self._options_executor is None:
+            _log.debug("TraderAgent: propose_spreads skipped — executor not ready")
+            return
+        settings = self._get_settings()
+        token = settings.get("telegram_token", "")
+        chat_id = settings.get("telegram_chat_id", "")
+        if not token or not chat_id:
+            _log.info("TraderAgent: propose_spreads skipped — Telegram not configured")
+            return
+
+        from notifiers.telegram_notifier import TelegramNotifier
+        from core.debit_spread_trader import propose_entries, check_exits
+
+        send = lambda text: TelegramNotifier.send_chunked(token, chat_id, text)
+        config = load_trader_config()
+        try:
+            new_proposals = propose_entries(self._executor, settings, config, send)
+            check_exits(self._executor, self._options_executor, settings, config, send)
+            self._log_step(
+                f"Debit spread cycle: {len(new_proposals)} new proposal(s) — exit checks complete"
+            )
+        except Exception:
+            _log.exception("TraderAgent: propose_spreads failed")
+            self._log_step("Debit spread proposal cycle errored — see log", "error")
+
+    def _process_approve_spread(self, symbol: str, reply_chat_id: str) -> None:
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._get_settings().get("telegram_token", "")
+        if self._executor is None or self._options_executor is None:
+            TelegramNotifier.send_message(token, reply_chat_id, "Trader agent is not connected to Alpaca yet.")
+            return
+        from core.debit_spread_trader import approve_spread
+        config = load_trader_config()
+        try:
+            reply = approve_spread(symbol, self._executor, self._options_executor, config)
+            self._log_step(f"Debit spread APPROVE {symbol}: {reply[:100]}", "trade")
+        except Exception as exc:
+            _log.exception("TraderAgent: approve_spread failed for %s", symbol)
+            reply = f"Approve failed for {symbol}: {exc}"
+        TelegramNotifier.send_message(token, reply_chat_id, reply)
+
+    def _process_close_spread(self, symbol: str, reply_chat_id: str) -> None:
+        from notifiers.telegram_notifier import TelegramNotifier
+        token = self._get_settings().get("telegram_token", "")
+        if self._options_executor is None:
+            TelegramNotifier.send_message(token, reply_chat_id, "Trader agent is not connected to Alpaca yet.")
+            return
+        from core.debit_spread_trader import close_spread
+        config = load_trader_config()
+        try:
+            reply = close_spread(symbol, self._options_executor, config)
+            self._log_step(f"Debit spread CLOSE {symbol}: {reply[:100]}", "trade")
+        except Exception as exc:
+            _log.exception("TraderAgent: close_spread failed for %s", symbol)
+            reply = f"Close failed for {symbol}: {exc}"
+        TelegramNotifier.send_message(token, reply_chat_id, reply)
 
     # ── Options layer ──────────────────────────────────────────────────────────
 

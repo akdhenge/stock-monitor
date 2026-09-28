@@ -140,6 +140,9 @@ class WebPublisher(QThread):
         alerts_data = self._serialize_alerts(now_utc)
         self._write_json("alerts.json", alerts_data)
 
+        trades_data = self._serialize_trades(now_utc)
+        self._write_json("trades.json", trades_data)
+
         self._write_ai_research(now_utc)
 
         self._update_history_snapshot(latest_data, now_utc)
@@ -347,6 +350,78 @@ class WebPublisher(QThread):
                 }
                 for e in entries
             ],
+        }
+
+    def _serialize_trades(self, now_utc: str) -> Dict[str, Any]:
+        """Recent fills (both sleeves) + the debit-spread proposal/position
+        state, for the web dashboard's Trades tab. Purely file-based — no
+        live Alpaca call from this thread, consistent with the rest of
+        web_publisher's read-only-store serialization pattern."""
+        from core.trade_journal import read_journal
+
+        fills = [r for r in read_journal(last_n=2000) if r.get("type") == "fill"]
+        recent_fills = []
+        for f in fills[-50:][::-1]:
+            recent_fills.append({
+                "ts":            f.get("ts"),
+                "instrument":    f.get("instrument", "stock"),
+                "symbol":        f.get("symbol"),
+                "side":          f.get("side"),
+                "strategy_type": f.get("strategy_type"),
+                "shares":        f.get("shares"),
+                "contracts":     f.get("contracts"),
+                "fill_price":    f.get("fill_price"),
+                "realized_pnl":  f.get("realized_pnl"),
+                "exit_reason":   f.get("exit_reason"),
+            })
+
+        debit_spreads: Dict[str, Any] = {
+            "pending_entry": [], "pending_close": [], "open_positions": [],
+        }
+        try:
+            from core.debit_spread_proposals_store import pending_entries, pending_closes
+            for p in pending_entries():
+                debit_spreads["pending_entry"].append({
+                    "symbol": p.symbol, "long_strike": p.long_strike, "short_strike": p.short_strike,
+                    "expiration": p.expiration, "net_debit": p.net_debit,
+                    "max_profit_per_contract": p.max_profit_per_contract,
+                    "max_loss_per_contract": p.max_loss_per_contract,
+                    "suggested_contracts": p.suggested_contracts,
+                    "confidence_score": p.confidence_score, "horizon_label": p.horizon_label,
+                    "cause_label": p.cause_label, "cause_summary": p.cause_summary,
+                    "proposed_at": p.proposed_at,
+                })
+            for p in pending_closes():
+                debit_spreads["pending_close"].append({
+                    "symbol": p.symbol, "close_reason": p.close_reason, "proposed_at": p.proposed_at,
+                })
+        except Exception:
+            pass
+        try:
+            from core.options_portfolio import load_all_option_meta
+            for meta in load_all_option_meta().values():
+                if meta.strategy_type != "bull_call_spread":
+                    continue
+                long_leg  = next((l for l in meta.legs if l.side == "long"),  None)
+                short_leg = next((l for l in meta.legs if l.side == "short"), None)
+                debit_spreads["open_positions"].append({
+                    "symbol":           meta.symbol,
+                    "long_strike":      long_leg.strike  if long_leg  else None,
+                    "short_strike":     short_leg.strike if short_leg else None,
+                    "expiration":       long_leg.expiration if long_leg else None,
+                    "entry_premium":    meta.entry_premium,
+                    "capital_deployed": meta.capital_deployed,
+                    "max_loss":         meta.max_loss,
+                    "opened_at":        meta.opened_at,
+                    "thesis":           (meta.thesis or "")[:150],
+                })
+        except Exception:
+            pass
+
+        return {
+            "updated_utc":   now_utc,
+            "recent_fills":  recent_fills,
+            "debit_spreads": debit_spreads,
         }
 
     def _serialize_alerts(self, now_utc: str) -> Dict[str, Any]:

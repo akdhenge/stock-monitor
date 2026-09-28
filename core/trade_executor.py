@@ -60,6 +60,7 @@ class TradeExecutor:
                 "market_value":    float(p.market_value)  if p.market_value  else None,
                 "unrealized_pl":   float(p.unrealized_pl) if p.unrealized_pl else None,
                 "cost_basis":      float(p.cost_basis)    if p.cost_basis    else None,
+                "asset_class":     str(p.asset_class.value) if getattr(p, "asset_class", None) else "us_equity",
             })
         return out
 

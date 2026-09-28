@@ -9,6 +9,9 @@ Accepted commands:
   /top
   /aiscan SYMBOL
   /stopaiscan — end the active follow-up session early
+  /approvespread SYMBOL — approve a pending debit-spread entry proposal
+  /closespread SYMBOL — close an open debit-spread position
+  /spreads — list pending debit-spread proposals + open positions
   (plain text) — follow-up question after /aiscan, if a session is active
 """
 import threading
@@ -58,6 +61,12 @@ class TelegramCommandPoller(QThread):
     cmd_resume      = pyqtSignal(str)
     # symbol, reply_chat_id
     cmd_sell = pyqtSignal(str, str)
+    # symbol, reply_chat_id
+    cmd_approvespread = pyqtSignal(str, str)
+    # symbol, reply_chat_id
+    cmd_closespread = pyqtSignal(str, str)
+    # reply_chat_id
+    cmd_spreads = pyqtSignal(str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -185,6 +194,12 @@ class TelegramCommandPoller(QThread):
             self.cmd_resume.emit(reply_chat_id)
         elif cmd == "/sell":
             self._handle_sell(parts, reply_chat_id)
+        elif cmd == "/approvespread":
+            self._handle_approvespread(parts, reply_chat_id)
+        elif cmd == "/closespread":
+            self._handle_closespread(parts, reply_chat_id)
+        elif cmd == "/spreads":
+            self.cmd_spreads.emit(reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
@@ -192,7 +207,8 @@ class TelegramCommandPoller(QThread):
                 "Unknown command.\n"
                 "<b>Watchlist:</b> /add /remove /list /mute /revise\n"
                 "<b>Scanner:</b> /scan /top /detail /aiscan /stopaiscan\n"
-                "<b>Trader:</b> /portfolio /positions /performance /tradelog /pause /resume /sell SYMBOL",
+                "<b>Trader:</b> /portfolio /positions /performance /tradelog /pause /resume /sell SYMBOL\n"
+                "<b>Debit spreads:</b> /spreads /approvespread SYMBOL /closespread SYMBOL",
             )
 
     def _handle_add(self, parts: list, reply_chat_id: str) -> None:
@@ -261,6 +277,24 @@ class TelegramCommandPoller(QThread):
             )
             return
         self.cmd_sell.emit(parts[1].upper(), reply_chat_id)
+
+    def _handle_approvespread(self, parts: list, reply_chat_id: str) -> None:
+        # /approvespread SYMBOL
+        if len(parts) < 2:
+            TelegramNotifier.send_message(
+                self._token, reply_chat_id, "Usage: /approvespread SYMBOL"
+            )
+            return
+        self.cmd_approvespread.emit(parts[1].upper(), reply_chat_id)
+
+    def _handle_closespread(self, parts: list, reply_chat_id: str) -> None:
+        # /closespread SYMBOL
+        if len(parts) < 2:
+            TelegramNotifier.send_message(
+                self._token, reply_chat_id, "Usage: /closespread SYMBOL"
+            )
+            return
+        self.cmd_closespread.emit(parts[1].upper(), reply_chat_id)
 
     def _handle_revise(self, parts: list, reply_chat_id: str) -> None:
         # /revise SYMBOL low|high NEW_PRICE
