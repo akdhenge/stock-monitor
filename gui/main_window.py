@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
         # Scanner state
         self._scanner: Optional[StockScanner] = None
         self._drawdown_scanner = None  # DrawdownScanner QThread
+        self._checkstock_scanner = None  # DrawdownScanner QThread, ad hoc single-ticker checks
         self._lookup_worker: Optional[TickerLookupWorker] = None
         self._scanner_top5:  Set[str] = set()
         self._scanner_top10: Set[str] = set()
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         # Web command poller — tracks pending web-initiated aiscan by symbol
         self._web_cmd_poller: Optional[WebCommandPoller] = None
         self._pending_webcmd_ai: Dict[str, str] = {}  # symbol -> cmd_id
+        self._pending_webcmd_checkstock: Dict[str, str] = {}  # symbol -> cmd_id
 
         # Claude ranking analyst
         self._ranking_analyst: Optional[ClaudeRankingAnalyst] = None
@@ -337,6 +339,7 @@ class MainWindow(QMainWindow):
         self._cmd_poller.cmd_approvespread.connect(self._on_cmd_approvespread)
         self._cmd_poller.cmd_closespread.connect(self._on_cmd_closespread)
         self._cmd_poller.cmd_spreads.connect(self._on_cmd_spreads)
+        self._cmd_poller.cmd_checkstock.connect(self._on_cmd_checkstock)
         self._cmd_poller.poll_error.connect(
             lambda msg: self._poll_status_label.setText(f"Bot: {msg}")
         )
@@ -463,6 +466,7 @@ class MainWindow(QMainWindow):
         )
         from core.drawdown_results_store import save_drawdown_results
         save_drawdown_results(results)
+        self._web_publisher.request_publish("drawdown_scan_complete")
 
     # ── Ticker Lookup ──────────────────────────────────────────────────────────
 
@@ -991,6 +995,19 @@ class MainWindow(QMainWindow):
                 return
             self._pending_webcmd_ranking = cmd_id
             self._run_claude_ranking(trigger="web", force_refresh=True)
+
+        elif cmd_type == "checkstock":
+            symbol = cmd.get("symbol", "").upper()
+            if not symbol:
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "error", "Missing symbol")
+                return
+            if self._checkstock_scanner is not None and self._checkstock_scanner.isRunning():
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "error", "A stock check is already running — try again shortly.")
+                return
+            self._pending_webcmd_checkstock[symbol] = cmd_id
+            self._on_cmd_checkstock(symbol, reply_chat_id="")
 
         else:
             _log.warning("WebCommandPoller: unknown command type: %s", cmd_type)
@@ -1873,3 +1890,45 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             msg = f"Spreads status error: {exc}"
         TelegramNotifier.send_chunked(token, reply_chat_id, msg)
+
+    # ── Ad hoc single-ticker 5-gate check ───────────────────────────────────────
+
+    def _on_cmd_checkstock(self, symbol: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        if self._checkstock_scanner is not None and self._checkstock_scanner.isRunning():
+            TelegramNotifier.send_message(
+                token, reply_chat_id, "A stock check is already running — please wait for it to finish."
+            )
+            return
+        from core.drawdown_scanner import DrawdownScanner
+        self._checkstock_scanner = DrawdownScanner(settings=self._settings, symbols_override=[symbol])
+        self._checkstock_scanner.scan_complete.connect(
+            lambda results, sym=symbol, cid=reply_chat_id: self._on_checkstock_complete(sym, results, cid)
+        )
+        self._checkstock_scanner.scan_error.connect(
+            lambda msg, sym=symbol, cid=reply_chat_id: self._on_checkstock_error(sym, msg, cid)
+        )
+        TelegramNotifier.send_message(
+            token, reply_chat_id, f"Running 5-gate check on <b>{symbol}</b>... this can take up to a few minutes."
+        )
+        self._checkstock_scanner.start()
+
+    def _on_checkstock_complete(self, symbol: str, results: list, reply_chat_id: str) -> None:
+        from core.drawdown_scanner import format_single_check
+        token = self._settings.get("telegram_token", "")
+        msg = format_single_check(symbol, results)
+        TelegramNotifier.send_chunked(token, reply_chat_id, msg)
+        if symbol in self._pending_webcmd_checkstock:
+            cmd_id = self._pending_webcmd_checkstock.pop(symbol)
+            if self._web_cmd_poller:
+                import re
+                plain = re.sub(r"<[^>]+>", "", msg)
+                self._web_cmd_poller.write_done(cmd_id, "ok", plain)
+
+    def _on_checkstock_error(self, symbol: str, error_msg: str, reply_chat_id: str) -> None:
+        token = self._settings.get("telegram_token", "")
+        TelegramNotifier.send_message(token, reply_chat_id, f"Check failed: {error_msg}")
+        if symbol in self._pending_webcmd_checkstock:
+            cmd_id = self._pending_webcmd_checkstock.pop(symbol)
+            if self._web_cmd_poller:
+                self._web_cmd_poller.write_done(cmd_id, "error", error_msg)

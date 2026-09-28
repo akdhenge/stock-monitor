@@ -23,7 +23,7 @@ _APP_VERSION = "0.3.0"
 
 _TRIGGER_PRIORITY = [
     "manual", "telegram",
-    "deep_scan_complete", "complete_scan_complete",
+    "deep_scan_complete", "complete_scan_complete", "drawdown_scan_complete",
     "alert", "watchlist_changed", "interval",
 ]
 
@@ -142,6 +142,9 @@ class WebPublisher(QThread):
 
         trades_data = self._serialize_trades(now_utc)
         self._write_json("trades.json", trades_data)
+
+        drawdown_data = self._serialize_drawdown(now_utc)
+        self._write_json("drawdown.json", drawdown_data)
 
         self._write_ai_research(now_utc)
 
@@ -422,6 +425,57 @@ class WebPublisher(QThread):
             "updated_utc":   now_utc,
             "recent_fills":  recent_fills,
             "debit_spreads": debit_spreads,
+        }
+
+    def _serialize_drawdown(self, now_utc: str) -> Dict[str, Any]:
+        """Sentiment-driven drawdown screener candidates for the web dashboard's
+        Drawdown tab — same store the desktop panel and the debit-spread sleeve
+        read from (data/drawdown_results.json), read-only here."""
+        from core.drawdown_results_store import load_drawdown_results
+
+        try:
+            results = load_drawdown_results()
+        except Exception:
+            results = []
+
+        candidates = [r for r in results if r.failed_gate is None]
+        misses = [r for r in results if r.failed_gate is not None]
+
+        def _row(r) -> Dict[str, Any]:
+            return {
+                "symbol": r.symbol,
+                "score": r.score,
+                "current_price": r.current_price,
+                "pct_below_high": r.pct_below_high,
+                "days_since_high": r.days_since_high,
+                "analyst_upside_pct": r.analyst_upside_pct,
+                "buy_rating_pct": r.buy_rating_pct,
+                "analyst_count": r.analyst_count,
+                "revenue_growth_yoy": r.revenue_growth_yoy,
+                "earnings_beat": r.earnings_beat,
+                "next_earnings_date": r.next_earnings_date,
+                "cause_label": r.cause_label,
+                "cause_summary": r.cause_summary,
+                "cause_confidence": r.cause_confidence,
+                "commodity_exposure": r.commodity_exposure,
+                "market_cap_b": r.market_cap_b,
+                "confidence_score": r.confidence_score,
+                "gate_margin_score": r.gate_margin_score,
+                "failed_gate": r.failed_gate,
+                "timestamp": r.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(r.timestamp, "strftime") else r.timestamp,
+            }
+
+        candidates.sort(key=lambda r: r.score, reverse=True)
+        # Closest misses first — gate_margin_score is the pipeline's own
+        # distance-from-passing signal; without this, misses is set-difference
+        # order (nondeterministic) and slicing to 30 gives a random subset.
+        misses.sort(key=lambda r: r.gate_margin_score, reverse=True)
+        scan_ts = max((r.timestamp for r in results), default=None)
+        return {
+            "updated_utc": now_utc,
+            "scan_timestamp_utc": scan_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(scan_ts, "strftime") else None,
+            "candidates": [_row(r) for r in candidates],
+            "near_misses": [_row(r) for r in misses[:30]],
         }
 
     def _serialize_alerts(self, now_utc: str) -> Dict[str, Any]:

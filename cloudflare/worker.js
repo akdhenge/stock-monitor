@@ -1,5 +1,5 @@
 const ALLOWED_ORIGINS = ["https://trader.akshaydhenge.uk"];
-const ALLOWED_TYPES = ["watchlist_add", "watchlist_remove", "watchlist_edit", "aiscan", "deep_scan", "claude_ranking"];
+const ALLOWED_TYPES = ["watchlist_add", "watchlist_remove", "watchlist_edit", "aiscan", "deep_scan", "claude_ranking", "checkstock"];
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];

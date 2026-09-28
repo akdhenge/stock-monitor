@@ -12,6 +12,7 @@ Accepted commands:
   /approvespread SYMBOL — approve a pending debit-spread entry proposal
   /closespread SYMBOL — close an open debit-spread position
   /spreads — list pending debit-spread proposals + open positions
+  /checkstock SYMBOL — run the 5-gate drawdown screen on a single ticker
   (plain text) — follow-up question after /aiscan, if a session is active
 """
 import threading
@@ -67,6 +68,8 @@ class TelegramCommandPoller(QThread):
     cmd_closespread = pyqtSignal(str, str)
     # reply_chat_id
     cmd_spreads = pyqtSignal(str)
+    # symbol, reply_chat_id
+    cmd_checkstock = pyqtSignal(str, str)
     # error message
     poll_error = pyqtSignal(str)
 
@@ -200,6 +203,8 @@ class TelegramCommandPoller(QThread):
             self._handle_closespread(parts, reply_chat_id)
         elif cmd == "/spreads":
             self.cmd_spreads.emit(reply_chat_id)
+        elif cmd == "/checkstock":
+            self._handle_checkstock(parts, reply_chat_id)
         else:
             TelegramNotifier.send_message(
                 self._token,
@@ -208,7 +213,8 @@ class TelegramCommandPoller(QThread):
                 "<b>Watchlist:</b> /add /remove /list /mute /revise\n"
                 "<b>Scanner:</b> /scan /top /detail /aiscan /stopaiscan\n"
                 "<b>Trader:</b> /portfolio /positions /performance /tradelog /pause /resume /sell SYMBOL\n"
-                "<b>Debit spreads:</b> /spreads /approvespread SYMBOL /closespread SYMBOL",
+                "<b>Debit spreads:</b> /spreads /approvespread SYMBOL /closespread SYMBOL\n"
+                "<b>Screener:</b> /checkstock SYMBOL",
             )
 
     def _handle_add(self, parts: list, reply_chat_id: str) -> None:
@@ -295,6 +301,15 @@ class TelegramCommandPoller(QThread):
             )
             return
         self.cmd_closespread.emit(parts[1].upper(), reply_chat_id)
+
+    def _handle_checkstock(self, parts: list, reply_chat_id: str) -> None:
+        # /checkstock SYMBOL
+        if len(parts) < 2:
+            TelegramNotifier.send_message(
+                self._token, reply_chat_id, "Usage: /checkstock SYMBOL"
+            )
+            return
+        self.cmd_checkstock.emit(parts[1].upper(), reply_chat_id)
 
     def _handle_revise(self, parts: list, reply_chat_id: str) -> None:
         # /revise SYMBOL low|high NEW_PRICE

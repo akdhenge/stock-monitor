@@ -242,10 +242,14 @@ class DrawdownScanner(QThread):
     scan_error    = pyqtSignal(str)
     scan_cost     = pyqtSignal(dict)   # cost breakdown dict emitted at end of scan
 
-    def __init__(self, settings: Dict[str, Any], parent=None):
+    def __init__(self, settings: Dict[str, Any], parent=None, symbols_override: Optional[List[str]] = None):
         super().__init__(parent)
         self._settings = settings
         self._running = False
+        # When set, the pipeline runs the 5 gates against exactly these symbols
+        # instead of fetching/screening the full S&P 500 universe — used for
+        # the ad hoc "/checkstock SYMBOL" single-ticker check.
+        self._symbols_override = symbols_override
 
     def stop(self) -> None:
         self._running = False
@@ -275,10 +279,15 @@ class DrawdownScanner(QThread):
         }
 
         # ── Fetch universe ────────────────────────────────────────────────────
-        self.scan_status.emit("Fetching S&P 500 universe...")
-        self.scan_progress.emit(2)
-        symbols = self._fetch_sp500()
-        self.scan_status.emit(f"Universe: {len(symbols)} symbols")
+        if self._symbols_override:
+            symbols = [s.upper() for s in self._symbols_override]
+            self.scan_status.emit(f"Checking {', '.join(symbols)}...")
+            self.scan_progress.emit(5)
+        else:
+            self.scan_status.emit("Fetching S&P 500 universe...")
+            self.scan_progress.emit(2)
+            symbols = self._fetch_sp500()
+            self.scan_status.emit(f"Universe: {len(symbols)} symbols")
 
         if not self._running:
             return []
@@ -286,12 +295,21 @@ class DrawdownScanner(QThread):
         # ── Gate 2: Drawdown filter ───────────────────────────────────────────
         self.scan_status.emit(f"Gate 2: Checking drawdowns ({len(symbols)} symbols)...")
         self.scan_progress.emit(5)
-        g2_survivors, g2_data = self._gate2_drawdown(symbols)
+        diagnostic_symbols = set(symbols) if self._symbols_override else None
+        g2_survivors, g2_data = self._gate2_drawdown(symbols, diagnostic_symbols)
         self.scan_status.emit(f"Gate 2: {len(g2_survivors)} passed (20-50% below 52w high within 180 days, volume >2M)")
         self.scan_progress.emit(20)
 
-        if not self._running or not g2_survivors:
-            return []
+        if not self._running:
+            return close_misses
+
+        if not g2_survivors:
+            if self._symbols_override:
+                for sym in symbols:
+                    close_misses.append(
+                        self._build_partial(sym, g2_data.get(sym, {}), {}, "gate2_drawdown_filter")
+                    )
+            return close_misses
 
         # ── Gate 3: Fundamentals ──────────────────────────────────────────────
         self.scan_status.emit(f"Gate 3: Checking fundamentals ({len(g2_survivors)} symbols)...")
@@ -403,9 +421,16 @@ class DrawdownScanner(QThread):
     # ── Gate 2: Drawdown filter ───────────────────────────────────────────────
 
     def _gate2_drawdown(
-        self, symbols: List[str]
+        self, symbols: List[str], diagnostic_symbols: Optional[Set[str]] = None
     ) -> Tuple[List[str], Dict[str, Dict]]:
-        """Batch-download 1Y daily history and filter by drawdown criteria."""
+        """Batch-download 1Y daily history and filter by drawdown criteria.
+
+        `diagnostic_symbols`, when given, makes symbols in that set always
+        record their computed metrics in `data` even when they fail the
+        gate — used by the ad hoc single-ticker check so the reject reason
+        can show real numbers instead of nothing. Full-universe screens
+        pass None so hundreds of non-survivors aren't tracked for no reason.
+        """
         survivors: List[str] = []
         data: Dict[str, Dict] = {}
 
@@ -462,7 +487,18 @@ class DrawdownScanner(QThread):
                 avg_volume_30d = 0.0
                 if "Volume" in df.columns:
                     avg_volume_30d = float(df["Volume"].tail(30).mean())
+
+                base_diag = {
+                    "current_price": current_price,
+                    "pct_below_high": pct_below,
+                    "days_since_high": days_since,
+                    "peak_price": peak_price,
+                    "avg_volume_30d": avg_volume_30d,
+                }
+
                 if avg_volume_30d < 2_000_000:
+                    if diagnostic_symbols and sym in diagnostic_symbols:
+                        data[sym] = base_diag
                     continue
 
                 drawdown_margin = _margin_range(
@@ -472,15 +508,13 @@ class DrawdownScanner(QThread):
                 days_margin = _margin_below(days_since, _G2_MAX_DAYS_SINCE_HIGH, _G2_DAYS_HARD_MAX)
 
                 if drawdown_margin is None or days_margin is None:
+                    if diagnostic_symbols and sym in diagnostic_symbols:
+                        data[sym] = base_diag
                     continue  # outside the tolerance band entirely — true reject
 
                 survivors.append(sym)
                 data[sym] = {
-                    "current_price": current_price,
-                    "pct_below_high": pct_below,
-                    "days_since_high": days_since,
-                    "peak_price": peak_price,
-                    "avg_volume_30d": avg_volume_30d,
+                    **base_diag,
                     "_margin_g2": (drawdown_margin + days_margin) / 2.0,
                 }
             except Exception:
@@ -1205,6 +1239,73 @@ class DrawdownScanner(QThread):
             _log.warning("Finnhub API key not set — Gates 3/4 will use yfinance approximations only")
             return None
         return FinnhubClient(key)
+
+
+# ── Single-ticker gate-check formatting ──────────────────────────────────────
+
+_GATE_SEQUENCE = [
+    ("gate2_drawdown_filter",      "Gate 2 — Drawdown (20-50% below 52w high, ≤180d, vol >2M)"),
+    ("gate3_fundamentals",         "Gate 3 — Fundamentals (rev growth >10%, op CF >0, mkt cap >$10B, earnings beat)"),
+    ("gate4_analyst_conviction",   "Gate 4 — Analyst conviction (upside >25%, buy% ≥70%, ≥10 analysts)"),
+    ("gate1_options_liquidity",    "Gate 1 — Options liquidity (OI ≥150, spread <5% near-ATM)"),
+    ("gate5_cause_of_drop",        "Gate 5 — LLM cause classification (non-fundamental)"),
+]
+# Gate 5's close-miss can also be tagged this way when the LLM confirms commodity exposure
+_GATE5_ALIASES = {"commodity_driven_high": "gate5_cause_of_drop"}
+
+
+def format_single_check(symbol: str, results: List[DrawdownResult]) -> str:
+    """Format the result of an ad hoc single-ticker 5-gate check for Telegram/web display."""
+    symbol = symbol.upper()
+    if not results:
+        return (
+            f"<b>{symbol}</b> — no data could be evaluated. "
+            f"Check the ticker is valid and has enough price history."
+        )
+
+    r = results[0]
+    failed_gate = _GATE5_ALIASES.get(r.failed_gate or "", r.failed_gate)
+    lines = [f"<b>5-Gate Check: {symbol}</b>", f"Price: ${r.current_price:.2f}"]
+
+    reached_fail = False
+    for key, label in _GATE_SEQUENCE:
+        if failed_gate is None:
+            mark = "✅"
+        elif key == failed_gate:
+            mark = "❌"
+            reached_fail = True
+        elif reached_fail:
+            mark = "—"
+        else:
+            mark = "✅"
+        lines.append(f"{mark} {label}")
+
+    lines.append("")
+    lines.append(f"% below 52w high: {r.pct_below_high*100:.1f}% ({r.days_since_high}d since high)")
+    lines.append(f"Avg 30d volume: {r.avg_volume_30d:,.0f}")
+    if r.market_cap_b:
+        lines.append(f"Market cap: ${r.market_cap_b:.1f}B — Rev growth YoY: {r.revenue_growth_yoy*100:.1f}%")
+    if r.analyst_count:
+        lines.append(
+            f"Analyst upside: {r.analyst_upside_pct*100:.1f}% — "
+            f"Buy%: {r.buy_rating_pct*100:.0f}% ({r.analyst_count} analysts)"
+        )
+    if r.options_verified:
+        lines.append("Options: liquid 6mo chain confirmed")
+    if r.cause_label and r.cause_label not in ("", "SKIPPED"):
+        lines.append(f"Cause: {r.cause_label} ({r.cause_confidence}) — {r.cause_summary}")
+    if r.commodity_exposure:
+        lines.append(f"Commodity exposure: {r.commodity_exposure}")
+
+    if failed_gate is None:
+        lines.append("")
+        lines.append(f"<b>PASSES all 5 gates. Composite score: {r.score:.1f}/100</b>")
+        lines.append(f"(confidence {r.confidence_score:.0f}, gate margin {r.gate_margin_score:.0f})")
+    else:
+        lines.append("")
+        lines.append(f"<b>Fails at:</b> {dict(_GATE_SEQUENCE).get(failed_gate, failed_gate)}")
+
+    return "\n".join(lines)
 
 
 # ── Headless entry point ─────────────────────────────────────────────────────

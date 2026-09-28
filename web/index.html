@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="app-v2.css?v=20260819a">
+  <link rel="stylesheet" href="app-v2.css?v=20260928a">
   <link rel="manifest" href="manifest.webmanifest">
 </head>
 
@@ -114,6 +114,7 @@
     <button role="tab" data-panel="panel-alerts" aria-selected="false">Alerts</button>
     <button role="tab" data-panel="panel-ai" aria-selected="false">AI Research</button>
     <button role="tab" data-panel="panel-ranking" aria-selected="false">Claude Ranking</button>
+    <button role="tab" data-panel="panel-drawdown" aria-selected="false">Drawdown</button>
     <button role="tab" data-panel="panel-history" aria-selected="false">History</button>
     <button role="tab" data-panel="panel-agent" aria-selected="false">Agent</button>
     <button role="tab" data-panel="panel-trades" aria-selected="false">Trades</button>
@@ -142,6 +143,10 @@
     </div>
   </section>
 
+  <section id="panel-drawdown" class="tab-panel" role="tabpanel">
+    <div class="empty-state">Loading drawdown screener…</div>
+  </section>
+
   <section id="panel-history" class="tab-panel" role="tabpanel">
     <div class="empty-state">Loading history…</div>
   </section>
@@ -166,7 +171,7 @@
   </footer>
 
   <script async src="https://tenor.com/embed.js"></script>
-  <script src="app-v2.js?v=20260819a"></script>
+  <script src="app-v2.js?v=20260928a"></script>
 </body>
 
 </html>

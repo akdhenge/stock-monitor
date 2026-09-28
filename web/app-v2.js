@@ -23,6 +23,9 @@ const state = {
   historySnaps: {},
   sortState: {},   // { tableId: { col: "total_score", dir: -1 } }
   agentStatus: null,
+  drawdown: null,
+  checkstockSymbol: "",
+  checkstockResult: null,   // { text, status }
 };
 
 // ── Write API ─────────────────────────────────────────────────────────────
@@ -302,6 +305,116 @@ function renderRanking(data) {
     </div>`;
 }
 
+// ── Drawdown Screener ──────────────────────────────────────────────────────
+
+async function checkStock() {
+  const symbol = (document.getElementById("checkstock-symbol")?.value || "").trim().toUpperCase();
+  if (!symbol) { showToast("Enter a symbol first.", "error"); return; }
+  state.checkstockSymbol = symbol;
+  state.checkstockResult = { text: `Checking ${symbol}…`, status: "pending" };
+  renderCheckstockResult();
+  showToast(`Running 5-gate check on ${symbol}… (can take a few minutes)`, "info");
+  try {
+    const { cmd_id } = await sendCmd({ type: "checkstock", symbol });
+    const result = await pollCmdDone(cmd_id, 240_000);
+    state.checkstockResult = { text: result.message || "", status: result.status };
+    renderCheckstockResult();
+    showToast(result.status === "ok" ? `Check complete for ${symbol}` : `Check error: ${result.message}`,
+      result.status === "ok" ? "ok" : "error");
+  } catch (err) {
+    state.checkstockResult = { text: err.message, status: "error" };
+    renderCheckstockResult();
+    showToast(err.message, "error");
+  }
+}
+
+// Renders just the result box + preserves the typed symbol — called both after
+// checkStock() resolves and from renderDrawdown() on a background refresh, so
+// a re-render from the 15-min publish poll doesn't wipe an in-flight/just-done check.
+function renderCheckstockResult() {
+  const box = document.getElementById("checkstock-result");
+  const input = document.getElementById("checkstock-symbol");
+  if (input && document.activeElement !== input) input.value = state.checkstockSymbol;
+  if (!box) return;
+  if (!state.checkstockResult) { box.innerHTML = ""; return; }
+  box.innerHTML = `<pre class="checkstock-pre">${escHtml(state.checkstockResult.text)}</pre>`;
+}
+
+function renderDrawdown() {
+  const el = document.getElementById("panel-drawdown");
+  if (!el) return;
+  const data = state.drawdown;
+
+  const formHtml = `
+    <div class="card">
+      <div class="card-title">Check Any Ticker</div>
+      <div style="padding:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <input id="checkstock-symbol" class="modal-input" style="max-width:160px;margin:0"
+          placeholder="e.g. MU" autocapitalize="characters" onkeydown="if(event.key==='Enter')checkStock()">
+        <button class="action-btn" onclick="checkStock()">Run 5-Gate Check</button>
+      </div>
+      <div id="checkstock-result" style="padding:0 16px 16px"></div>
+    </div>`;
+
+  if (!data || (!data.candidates?.length && !data.near_misses?.length)) {
+    el.innerHTML = formHtml + '<div class="empty-state">No drawdown screener results yet. Runs automatically once a day.</div>';
+    renderCheckstockResult();
+    return;
+  }
+
+  const ts = data.scan_timestamp_utc ? ` — <span style="color:var(--muted);font-size:11px">${fmtUTC(data.scan_timestamp_utc)}</span>` : "";
+
+  let candRows = (data.candidates || []).map((r, i) => {
+    const pctBelow = r.pct_below_high != null ? (r.pct_below_high * 100).toFixed(1) + "%" : "—";
+    const upside   = r.analyst_upside_pct != null ? (r.analyst_upside_pct * 100).toFixed(1) + "%" : "—";
+    const buyPct   = r.buy_rating_pct != null ? (r.buy_rating_pct * 100).toFixed(0) + "%" : "—";
+    const commodityChip = r.commodity_exposure === "MEDIUM"
+      ? `<span class="chip chip-amber">MEDIUM commodity</span>`
+      : "";
+    return `<tr>
+      <td>${i + 1}</td>
+      <td><b>${r.symbol}</b></td>
+      <td><div class="score-bar-wrap">
+        <span>${r.score?.toFixed(1) ?? "—"}</span>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${r.score ?? 0}%"></div></div>
+      </div></td>
+      <td>${r.current_price != null ? "$" + r.current_price.toFixed(2) : "—"}</td>
+      <td>${pctBelow}</td>
+      <td>${upside}</td>
+      <td>${buyPct}</td>
+      <td>${r.next_earnings_date ?? "—"}</td>
+      <td>${r.cause_label || "—"} ${commodityChip}</td>
+    </tr>`;
+  }).join("");
+
+  let candSection = data.candidates?.length
+    ? `<div class="card"><div class="card-title">Drawdown Candidates${ts}</div>
+      <div style="overflow-x:auto"><table><thead><tr>
+        <th>#</th><th>Symbol</th><th>Score</th><th>Price</th><th>% Below High</th>
+        <th>Analyst Upside</th><th>Buy%</th><th>Next Earnings</th><th>Cause</th>
+      </tr></thead><tbody>${candRows}</tbody></table></div></div>`
+    : `<div class="card"><div class="card-title">Drawdown Candidates${ts}</div>
+       <div class="empty-state" style="padding:20px 0">No passing candidates in the latest scan</div></div>`;
+
+  const missRows = (data.near_misses || []).slice(0, 15).map(r => `
+    <tr>
+      <td><b>${r.symbol}</b></td>
+      <td>${r.failed_gate || "—"}</td>
+      <td>${r.pct_below_high != null ? (r.pct_below_high * 100).toFixed(1) + "%" : "—"}</td>
+      <td>${r.current_price != null ? "$" + r.current_price.toFixed(2) : "—"}</td>
+    </tr>`).join("");
+
+  let missSection = data.near_misses?.length
+    ? `<div class="card"><div class="card-title">Near Misses</div>
+      <div style="overflow-x:auto"><table><thead><tr>
+        <th>Symbol</th><th>Failed Gate</th><th>% Below High</th><th>Price</th>
+      </tr></thead><tbody>${missRows}</tbody></table></div></div>`
+    : "";
+
+  el.innerHTML = formHtml + candSection + missSection;
+  renderCheckstockResult();
+}
+
 // ── Fetch helpers ──────────────────────────────────────────────────────────
 
 async function fetchJSON(url) {
@@ -323,18 +436,20 @@ async function refresh() {
 
     if (changed) {
       state.lastSeenUtc = meta.last_updated_utc;
-      const [latest, watchlist, alerts, aiIndex, trades] = await Promise.all([
+      const [latest, watchlist, alerts, aiIndex, trades, drawdown] = await Promise.all([
         fetchJSON(`${DATA_BASE}/latest.json`),
         fetchJSON(`${DATA_BASE}/watchlist.json`),
         fetchJSON(`${DATA_BASE}/alerts.json`),
         fetchJSON(`${DATA_BASE}/ai_research/index.json`).catch(() => ({ entries: [] })),
         fetchJSON(`${DATA_BASE}/trades.json`).catch(() => null),
+        fetchJSON(`${DATA_BASE}/drawdown.json`).catch(() => null),
       ]);
       state.latest    = latest;
       state.watchlist = watchlist;
       state.alerts    = alerts;
       state.aiIndex   = aiIndex;
       state.trades    = trades;
+      state.drawdown  = drawdown;
       renderAll();
     }
   } catch (err) {
@@ -394,6 +509,7 @@ function renderAll() {
   renderHistory();
   renderAgentStatus();
   renderTrades();
+  renderDrawdown();
 }
 
 // ── Top Picks ──────────────────────────────────────────────────────────────
