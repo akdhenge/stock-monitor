@@ -996,6 +996,15 @@ class MainWindow(QMainWindow):
             self._pending_webcmd_ranking = cmd_id
             self._run_claude_ranking(trigger="web", force_refresh=True)
 
+        elif cmd_type == "drawdown_scan":
+            if self._drawdown_scanner is not None and self._drawdown_scanner.isRunning():
+                if self._web_cmd_poller:
+                    self._web_cmd_poller.write_done(cmd_id, "ok", "scan_already_running")
+                return
+            if self._web_cmd_poller:
+                self._web_cmd_poller.write_done(cmd_id, "ok", "scan_started")
+            self._trigger_drawdown_scan()
+
         elif cmd_type == "checkstock":
             symbol = cmd.get("symbol", "").upper()
             if not symbol:

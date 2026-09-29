@@ -199,6 +199,16 @@ async function runDeepScan() {
   }
 }
 
+async function runDrawdownScan() {
+  showToast("Requesting drawdown scan…", "info");
+  try {
+    await sendCmd({ type: "drawdown_scan" });
+    showToast("Drawdown scan started — screens ~500 stocks, can take several minutes. Results appear here when done.", "ok");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
 async function runAiScan() {
   const symbol = (document.getElementById("aiscan-symbol")?.value || "").trim().toUpperCase();
   if (!symbol) { showToast("Enter a symbol first.", "error"); return; }
@@ -346,6 +356,13 @@ function renderDrawdown() {
   const data = state.drawdown;
 
   const formHtml = `
+    <div class="card">
+      <div class="card-title">Full Screener Scan</div>
+      <div style="padding:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="action-btn" onclick="runDrawdownScan()">▶ Run Drawdown Scan</button>
+        <span style="color:var(--muted);font-size:12px">Manual trigger — runs automatically once a day, use this if that ever fails to fire.</span>
+      </div>
+    </div>
     <div class="card">
       <div class="card-title">Check Any Ticker</div>
       <div style="padding:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">

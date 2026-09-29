@@ -1,5 +1,5 @@
 const ALLOWED_ORIGINS = ["https://trader.akshaydhenge.uk"];
-const ALLOWED_TYPES = ["watchlist_add", "watchlist_remove", "watchlist_edit", "aiscan", "deep_scan", "claude_ranking", "checkstock"];
+const ALLOWED_TYPES = ["watchlist_add", "watchlist_remove", "watchlist_edit", "aiscan", "deep_scan", "claude_ranking", "checkstock", "drawdown_scan"];
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
@@ -22,7 +22,7 @@ function validateCommand(cmd) {
   if (!ALLOWED_TYPES.includes(cmd.type)) {
     return `Unknown command type: ${cmd.type}`;
   }
-  if (cmd.type !== "deep_scan" && cmd.type !== "claude_ranking") {
+  if (cmd.type !== "deep_scan" && cmd.type !== "claude_ranking" && cmd.type !== "drawdown_scan") {
     if (!cmd.symbol || typeof cmd.symbol !== "string") return "Missing or invalid symbol";
     cmd.symbol = cmd.symbol.toUpperCase().trim();
   }
