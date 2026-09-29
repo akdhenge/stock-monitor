@@ -364,6 +364,13 @@ function renderDrawdown() {
 
   const ts = data.scan_timestamp_utc ? ` — <span style="color:var(--muted);font-size:11px">${fmtUTC(data.scan_timestamp_utc)}</span>` : "";
 
+  const staleBanner = data.candidates_stale
+    ? `<div style="padding:8px 16px;color:var(--amber);font-size:13px;border-top:1px dashed var(--border)">
+        ⚠ Today's scan found no new passing candidates — showing the last known candidates from
+        ${data.candidates_scan_timestamp_utc ? fmtUTC(data.candidates_scan_timestamp_utc) : "an earlier scan"}.
+      </div>`
+    : "";
+
   let candRows = (data.candidates || []).map((r, i) => {
     const pctBelow = r.pct_below_high != null ? (r.pct_below_high * 100).toFixed(1) + "%" : "—";
     const upside   = r.analyst_upside_pct != null ? (r.analyst_upside_pct * 100).toFixed(1) + "%" : "—";
@@ -392,7 +399,7 @@ function renderDrawdown() {
       <div style="overflow-x:auto"><table><thead><tr>
         <th>#</th><th>Symbol</th><th>Score</th><th>Price</th><th>% Below High</th>
         <th>Analyst Upside</th><th>Buy%</th><th>Next Earnings</th><th>Cause</th>
-      </tr></thead><tbody>${candRows}</tbody></table></div></div>`
+      </tr></thead><tbody>${candRows}</tbody></table></div>${staleBanner}</div>`
     : `<div class="card"><div class="card-title">Drawdown Candidates${ts}</div>
        <div class="empty-state" style="padding:20px 0">No passing candidates in the latest scan</div></div>`;
 

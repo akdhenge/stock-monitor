@@ -471,10 +471,38 @@ class WebPublisher(QThread):
         # order (nondeterministic) and slicing to 30 gives a random subset.
         misses.sort(key=lambda r: r.gate_margin_score, reverse=True)
         scan_ts = max((r.timestamp for r in results), default=None)
+
+        candidate_rows = [_row(r) for r in candidates]
+        candidates_stale = False
+        candidates_scan_timestamp_utc = scan_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(scan_ts, "strftime") else None
+
+        # data/drawdown_results.json is overwritten wholesale on every scan
+        # (including the automated daily one) — a day that finds zero passing
+        # candidates would otherwise blank out the web dashboard even though
+        # yesterday's real candidates are still valid until a newer scan finds
+        # something. Fall back to the last-published non-empty candidate set,
+        # flagged as stale, rather than showing nothing. This only affects the
+        # published web view — the underlying store (read directly by
+        # debit_spread_trader for trading decisions) is untouched.
+        if not candidate_rows:
+            prev_path = os.path.join(_PUBLISH_DIR, "drawdown.json")
+            if os.path.exists(prev_path):
+                try:
+                    with open(prev_path, encoding="utf-8") as f:
+                        prev = json.load(f)
+                    if prev.get("candidates"):
+                        candidate_rows = prev["candidates"]
+                        candidates_stale = True
+                        candidates_scan_timestamp_utc = prev.get("scan_timestamp_utc")
+                except Exception:
+                    _log.warning("WebPublisher: could not read previous drawdown.json for fallback", exc_info=True)
+
         return {
             "updated_utc": now_utc,
             "scan_timestamp_utc": scan_ts.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(scan_ts, "strftime") else None,
-            "candidates": [_row(r) for r in candidates],
+            "candidates": candidate_rows,
+            "candidates_stale": candidates_stale,
+            "candidates_scan_timestamp_utc": candidates_scan_timestamp_utc,
             "near_misses": [_row(r) for r in misses[:30]],
         }
 
